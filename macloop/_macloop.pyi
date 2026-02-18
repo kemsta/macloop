@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeAlias
+
+import numpy as np
+import numpy.typing as npt
+
+AudioSamples: TypeAlias = npt.NDArray[np.int16] | npt.NDArray[np.float32]
 
 
 class AudioProcessingConfig:
@@ -82,7 +87,7 @@ class AudioEngine:
 
     def start(
         self,
-        callback: Callable[[str, Any], None],
+        callback: Callable[[str, AudioSamples], None],
         capture_system: bool = True,
         capture_mic: bool = False,
     ) -> None: ...

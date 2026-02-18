@@ -30,17 +30,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Set up uv
-      uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v4
 
       - name: Run tests
-      run: |
-        uv sync --group dev
-        uv run --reinstall-package macloop pytest -q tests
+        run: |
+          uv sync --group dev
+          uv run --reinstall-package macloop pytest -q tests
 
   build:
     name: Build wheels and sdist

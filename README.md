@@ -41,6 +41,7 @@ with macloop.Capture(
 ) as stream:
     for chunk in stream:
         print(chunk.source, len(chunk.samples))
+        # chunk.samples is numpy.ndarray (int16 or float32)
 ```
 
 ## Quick Start (asyncio)
@@ -65,6 +66,43 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Data Format
+
+`AudioChunk.samples` is a `numpy.ndarray`:
+
+- `np.int16` when `sample_format="i16"`
+- `np.float32` when `sample_format="f32"`
+
+This makes it convenient to pass chunks directly to model inference pipelines
+without extra conversion.
+
+```python
+# Example: direct handoff to inference-friendly float32
+import numpy as np
+import macloop
+
+sources = macloop.list_audio_sources()
+display = next(s for s in sources if s["type"] == "display")
+cfg = macloop.AudioProcessingConfig(sample_format="f32", sample_rate=16000, channels=1)
+
+with macloop.Capture(display_id=display["display_id"], config=cfg) as stream:
+    for chunk in stream:
+        x = chunk.samples.astype(np.float32, copy=False)
+        # model(x)
+```
+
+## Sherpa ASR Demo
+
+For speech-to-text (ASR), use this short example:
+
+```bash
+uv run --with sherpa-onnx --with huggingface_hub --reinstall-package macloop \
+  python examples/sherpa_asr_demo.py --seconds 5
+```
+
+It captures microphone audio with `macloop`, downloads a Sherpa model from Hugging Face
+(or uses `--model-dir`), and prints transcript text.
 
 ## Notes
 

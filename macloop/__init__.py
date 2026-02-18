@@ -4,16 +4,22 @@ import asyncio
 import queue
 import threading
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Iterator, Optional
+from typing import Any, AsyncIterator, Iterator, Optional, TypeAlias
+
+import numpy as np
+import numpy.typing as npt
 
 from ._macloop import AudioEngine as _AudioEngine
 from ._macloop import AudioProcessingConfig, list_audio_sources
 
 
+AudioSamples: TypeAlias = npt.NDArray[np.int16] | npt.NDArray[np.float32]
+
+
 @dataclass(frozen=True)
 class AudioChunk:
     source: str
-    samples: Any
+    samples: AudioSamples
 
 
 _STOP = object()
@@ -72,13 +78,13 @@ class Capture:
         loop.call_soon_threadsafe(_put)
 
     def _build_sync_callback(self):
-        def _callback(source: str, samples: Any) -> None:
+        def _callback(source: str, samples: AudioSamples) -> None:
             self._enqueue_sync(AudioChunk(source=source, samples=samples))
 
         return _callback
 
     def _build_async_callback(self):
-        def _callback(source: str, samples: Any) -> None:
+        def _callback(source: str, samples: AudioSamples) -> None:
             self._enqueue_async(AudioChunk(source=source, samples=samples))
 
         return _callback
@@ -164,4 +170,4 @@ class Capture:
         return self._engine.get_stats()
 
 
-__all__ = ["AudioProcessingConfig", "AudioChunk", "Capture", "list_audio_sources"]
+__all__ = ["AudioProcessingConfig", "AudioSamples", "AudioChunk", "Capture", "list_audio_sources"]
