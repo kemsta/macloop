@@ -40,6 +40,26 @@ jobs:
           uv sync --group dev
           uv run --reinstall-package macloop pytest -q tests
 
+      - name: Install Rust coverage tooling
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --locked
+
+      - name: Generate Rust coverage report (lcov)
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          flags: rust
+          fail_ci_if_error: false
+
   build:
     name: Build wheels and sdist
     needs: test

@@ -1,5 +1,10 @@
 # macloop
 
+[![CI](https://github.com/kemsta/macloop/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/kemsta/macloop/actions/workflows/publish.yml)
+[![PyPI](https://img.shields.io/pypi/v/macloop.svg)](https://pypi.org/project/macloop/)
+[![TestPyPI](https://img.shields.io/badge/TestPyPI-macloop-blue)](https://test.pypi.org/project/macloop/)
+[![codecov](https://codecov.io/gh/kemsta/macloop/branch/main/graph/badge.svg)](https://codecov.io/gh/kemsta/macloop)
+
 Low-latency macOS audio capture and processing for Python, powered by Rust.
 
 - System audio and microphone capture via ScreenCaptureKit
