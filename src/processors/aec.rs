@@ -39,7 +39,7 @@ impl AecProcessor {
 
     pub fn new(config: AudioProcessingConfig, stats: RuntimeStatsHandle) -> Self {
         let apm = if config.enable_aec {
-            Some(Self::create_apm(&config))
+            Self::create_apm(&config)
         } else {
             None
         };
@@ -265,11 +265,17 @@ impl AecProcessor {
         apm_config
     }
 
-    fn create_apm(config: &AudioProcessingConfig) -> Processor {
-        let apm = Processor::new(48_000).expect("Failed to create WebRTC Processor for AEC");
+    fn create_apm(config: &AudioProcessingConfig) -> Option<Processor> {
+        let apm = match Processor::new(48_000) {
+            Ok(apm) => apm,
+            Err(err) => {
+                eprintln!("Warning: failed to create AEC processor: {}", err);
+                return None;
+            }
+        };
         let delay_ms = config.aec_stream_delay_ms.max(0);
         apm.set_config(Self::build_apm_config(delay_ms));
-        apm
+        Some(apm)
     }
 }
 

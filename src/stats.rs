@@ -103,6 +103,7 @@ impl RuntimeStatsHandle {
         }
     }
 
+    #[allow(dead_code)]
     pub fn reset(&self) {
         if let Ok(mut stats) = self.inner.lock() {
             *stats = RuntimeStats::default();

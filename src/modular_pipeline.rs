@@ -10,6 +10,7 @@ use numpy::ToPyArray;
 use std::time::Instant;
 
 /// Modular pipeline that processes audio through a chain of processors
+#[allow(dead_code)]
 pub struct ModularPipeline {
     rx: Receiver<AudioFrame>,
     stop_rx: Receiver<()>,
@@ -20,6 +21,7 @@ pub struct ModularPipeline {
     stats: RuntimeStatsHandle,
 }
 
+#[allow(dead_code)]
 impl ModularPipeline {
     fn select_total_pipeline_delay(input_timestamp: u64, output_timestamp: u64, processing_delay: u64) -> u64 {
         let timestamp_delay = output_timestamp.saturating_sub(input_timestamp);

@@ -31,8 +31,8 @@ impl SCStreamOutputTrait for AudioOutputHandler {
                 
                 if num_buffers == 0 { return; }
 
-                // Get first buffer to check channels
-                let first_buffer = audio_data.get(0).unwrap();
+                // Get first buffer to check channels; skip malformed empty payloads.
+                let Some(first_buffer) = audio_data.get(0) else { return; };
                 let channels_per_buffer = first_buffer.number_channels as usize;
 
                 if num_buffers == 1 {
