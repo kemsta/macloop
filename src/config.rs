@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-#[pyclass(skip_from_py_object)]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct AudioProcessingConfig {
     #[pyo3(get, set)]
