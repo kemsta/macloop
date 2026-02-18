@@ -14,7 +14,7 @@ pub struct NoiseSuppressionProcessor {
 impl NoiseSuppressionProcessor {
     pub fn new(config: AudioProcessingConfig) -> Self {
         let apm = if config.enable_ns {
-            Some(Self::create_ns_apm(&config))
+            Self::create_ns_apm(&config)
         } else {
             None
         };
@@ -25,8 +25,14 @@ impl NoiseSuppressionProcessor {
         }
     }
     
-    fn create_ns_apm(_config: &AudioProcessingConfig) -> Processor {
-        let apm = Processor::new(48_000).expect("Failed to create WebRTC Processor for Noise Suppression");
+    fn create_ns_apm(_config: &AudioProcessingConfig) -> Option<Processor> {
+        let apm = match Processor::new(48_000) {
+            Ok(apm) => apm,
+            Err(err) => {
+                eprintln!("Warning: failed to create NS processor: {}", err);
+                return None;
+            }
+        };
 
         let mut apm_config = Config::default();
         
@@ -44,7 +50,7 @@ impl NoiseSuppressionProcessor {
         apm_config.gain_controller = None;
 
         apm.set_config(apm_config);
-        apm
+        Some(apm)
     }
 }
 
@@ -88,7 +94,7 @@ impl AudioProcessor for NoiseSuppressionProcessor {
     fn reset(&mut self) {
         // Reset NS processor state if needed
         if self.config.enable_ns {
-            self.apm = Some(Self::create_ns_apm(&self.config));
+            self.apm = Self::create_ns_apm(&self.config);
         } else {
             self.apm = None;
         }

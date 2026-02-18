@@ -26,6 +26,7 @@ impl<'a> Adapter<'a, f32> for PlanarBuffer<'a> {
 
 struct StreamState {
     resampler: Option<Fft<f32>>,
+    source_rate: u32,
     input_buffer: VecDeque<f32>,
     output_queue: VecDeque<f32>,
     current_timestamp: u64,
@@ -36,20 +37,30 @@ struct StreamState {
 impl StreamState {
     fn new(source_rate: u32, target_rate: u32, target_channels: u16, chunk_size: usize) -> Self {
         let resampler = if source_rate != target_rate {
-            Some(Fft::<f32>::new(
+            match Fft::<f32>::new(
                 source_rate as usize,
                 target_rate as usize,
                 chunk_size,
                 1,
                 target_channels as usize,
                 FixedSync::Input,
-            ).expect("Failed to create resampler"))
+            ) {
+                Ok(resampler) => Some(resampler),
+                Err(err) => {
+                    eprintln!(
+                        "Warning: failed to create resampler {}->{}Hz: {}. Falling back to passthrough.",
+                        source_rate, target_rate, err
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
         Self {
             resampler,
+            source_rate,
             input_buffer: VecDeque::with_capacity(chunk_size * 4),
             output_queue: VecDeque::with_capacity(chunk_size * 4),
             current_timestamp: 0,
@@ -158,12 +169,18 @@ impl ResampleProcessor {
 
                 if channels == 1 {
                     for _ in 0..chunk_size {
-                        planar_data[0].push(state.input_buffer.pop_front().unwrap());
+                        let Some(sample) = state.input_buffer.pop_front() else {
+                            return results;
+                        };
+                        planar_data[0].push(sample);
                     }
                 } else {
                     for _ in 0..chunk_size {
                         for channel_buf in &mut planar_data {
-                            channel_buf.push(state.input_buffer.pop_front().unwrap());
+                            let Some(sample) = state.input_buffer.pop_front() else {
+                                return results;
+                            };
+                            channel_buf.push(sample);
                         }
                     }
                 }
@@ -178,12 +195,20 @@ impl ResampleProcessor {
                     let mut samples = Vec::new();
                     if channels == 1 {
                         for i in 0..output.frames() {
-                            samples.push(output.read_sample(0, i).unwrap());
+                            if let Some(sample) = output.read_sample(0, i) {
+                                samples.push(sample);
+                            } else {
+                                return results;
+                            }
                         }
                     } else {
                         for i in 0..output.frames() {
                             for ch in 0..channels {
-                                samples.push(output.read_sample(ch, i).unwrap());
+                                if let Some(sample) = output.read_sample(ch, i) {
+                                    samples.push(sample);
+                                } else {
+                                    return results;
+                                }
                             }
                         }
                     }
@@ -214,7 +239,11 @@ impl ResampleProcessor {
             results.push(AudioFrame {
                 source,
                 samples,
-                sample_rate: target_rate,
+                sample_rate: if state.source_rate == target_rate {
+                    target_rate
+                } else {
+                    state.source_rate
+                },
                 channels: target_channels,
                 timestamp: frame_ts,
             });
