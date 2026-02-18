@@ -16,6 +16,22 @@ struct AudioOutputHandler {
     source_type: AudioSourceType,
 }
 
+fn cm_time_to_ns(value: i64, timescale: i32) -> u64 {
+    if timescale <= 0 || value < 0 {
+        return 0;
+    }
+
+    let value = value as u64;
+    let timescale = timescale as u64;
+
+    if value <= u64::MAX / 1_000_000_000 {
+        (value * 1_000_000_000) / timescale
+    } else {
+        // For very large values, divide first to avoid multiplication overflow.
+        value / timescale * 1_000_000_000 + (value % timescale * 1_000_000_000) / timescale
+    }
+}
+
 impl SCStreamOutputTrait for AudioOutputHandler {
     fn did_output_sample_buffer(&self, sample_buffer: CMSampleBuffer, of_type: SCStreamOutputType) {
         let is_target = match (self.source_type, of_type) {
@@ -59,22 +75,7 @@ impl SCStreamOutputTrait for AudioOutputHandler {
 
                 if !interleaved_samples.is_empty() {
                     let pts = sample_buffer.presentation_timestamp();
-                    // Convert CMTime to nanoseconds (value / timescale * 1e9)
-                    // Use saturating arithmetic to prevent overflow
-                    let timestamp = if pts.timescale > 0 && pts.value >= 0 {
-                        let value = pts.value as u64;
-                        let timescale = pts.timescale as u64;
-                        // Check for potential overflow before multiplication
-                        if value <= u64::MAX / 1_000_000_000 {
-                            (value * 1_000_000_000) / timescale
-                        } else {
-                            // For very large values, do division first to prevent overflow
-                            value / timescale * 1_000_000_000 + 
-                            (value % timescale * 1_000_000_000) / timescale
-                        }
-                    } else {
-                        0
-                    };
+                    let timestamp = cm_time_to_ns(pts.value, pts.timescale);
 
                     let packet = AudioFrame {
                         source: self.source_type,
@@ -153,4 +154,29 @@ pub fn spawn_capture_engine(
 
     stream.start_capture().map_err(|e| anyhow!("Failed to start capture: {}", e))?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cm_time_to_ns;
+
+    #[test]
+    fn cm_time_to_ns_converts_basic_values() {
+        assert_eq!(cm_time_to_ns(1, 1), 1_000_000_000);
+        assert_eq!(cm_time_to_ns(480, 48_000), 10_000_000);
+    }
+
+    #[test]
+    fn cm_time_to_ns_rejects_invalid_input() {
+        assert_eq!(cm_time_to_ns(-1, 1), 0);
+        assert_eq!(cm_time_to_ns(1, 0), 0);
+        assert_eq!(cm_time_to_ns(1, -1), 0);
+    }
+
+    #[test]
+    fn cm_time_to_ns_handles_large_values_without_overflow() {
+        let large = i64::MAX;
+        let out = cm_time_to_ns(large, 48_000);
+        assert!(out > 0);
+    }
 }
