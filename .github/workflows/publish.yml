@@ -37,6 +37,11 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
 
+      - name: Install native build deps
+        run: |
+          brew update
+          brew install meson ninja pkg-config
+
       - name: Run tests
         run: |
           uv sync --group dev
@@ -56,6 +61,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install native build deps
+        run: |
+          brew update
+          brew install meson ninja pkg-config
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
