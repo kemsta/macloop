@@ -401,6 +401,43 @@ mod tests {
         fn reset(&mut self) {}
     }
 
+    struct PassAndDrainOnce {
+        drained: bool,
+    }
+    impl AudioProcessor for PassAndDrainOnce {
+        fn process(&mut self, frame: AudioFrame) -> anyhow::Result<Option<AudioFrame>> {
+            Ok(Some(frame))
+        }
+        fn drain_ready(&mut self) -> anyhow::Result<Option<AudioFrame>> {
+            if self.drained {
+                Ok(None)
+            } else {
+                self.drained = true;
+                Ok(Some(AudioFrame {
+                    source: AudioSourceType::Microphone,
+                    samples: vec![0.7; 4],
+                    sample_rate: 48_000,
+                    channels: 1,
+                    timestamp: 123,
+                }))
+            }
+        }
+        fn flush(&mut self) -> Vec<AudioFrame> { Vec::new() }
+        fn reset(&mut self) {}
+    }
+
+    struct ErrorProcessor;
+    impl AudioProcessor for ErrorProcessor {
+        fn process(&mut self, _frame: AudioFrame) -> anyhow::Result<Option<AudioFrame>> {
+            Err(anyhow::anyhow!("boom"))
+        }
+        fn drain_ready(&mut self) -> anyhow::Result<Option<AudioFrame>> {
+            Err(anyhow::anyhow!("drain boom"))
+        }
+        fn flush(&mut self) -> Vec<AudioFrame> { Vec::new() }
+        fn reset(&mut self) {}
+    }
+
     #[test]
     fn total_pipeline_delay_prefers_timestamp_when_plausible() {
         let d = ModularPipeline::select_total_pipeline_delay(1_000, 2_000, 777);
@@ -438,5 +475,64 @@ mod tests {
         };
         let out = ModularPipeline::process_through_processors_static(&mut processors, input, &stats);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn static_pipeline_collects_drain_ready_frames() {
+        let mut processors: Vec<Box<dyn AudioProcessor>> =
+            vec![Box::new(PassAndDrainOnce { drained: false })];
+        let stats = RuntimeStatsHandle::new();
+        let input = AudioFrame {
+            source: AudioSourceType::Microphone,
+            samples: vec![0.1; 4],
+            sample_rate: 48_000,
+            channels: 1,
+            timestamp: 0,
+        };
+
+        let out = ModularPipeline::process_through_processors_static(&mut processors, input, &stats);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].samples.len(), 4);
+        assert_eq!(out[1].timestamp, 123);
+    }
+
+    #[test]
+    fn static_pipeline_counts_process_and_drain_errors() {
+        let mut processors: Vec<Box<dyn AudioProcessor>> = vec![Box::new(ErrorProcessor)];
+        let stats = RuntimeStatsHandle::new();
+        let input = AudioFrame {
+            source: AudioSourceType::Microphone,
+            samples: vec![0.1; 4],
+            sample_rate: 48_000,
+            channels: 1,
+            timestamp: 0,
+        };
+
+        let out = ModularPipeline::process_through_processors_static(&mut processors, input, &stats);
+        assert!(out.is_empty());
+        let snap = stats.snapshot();
+        assert_eq!(snap.processor_errors, 1);
+        assert_eq!(snap.processor_drain_errors, 1);
+    }
+
+    #[test]
+    fn static_pipeline_processes_multiple_processors_in_order() {
+        let mut processors: Vec<Box<dyn AudioProcessor>> = vec![
+            Box::new(PassAndDrainOnce { drained: false }),
+            Box::new(PassAndDrainOnce { drained: false }),
+        ];
+        let stats = RuntimeStatsHandle::new();
+        let input = AudioFrame {
+            source: AudioSourceType::Microphone,
+            samples: vec![0.2; 8],
+            sample_rate: 48_000,
+            channels: 1,
+            timestamp: 42,
+        };
+
+        let out = ModularPipeline::process_through_processors_static(&mut processors, input, &stats);
+        assert!(!out.is_empty());
+        // At least one frame should survive both processors.
+        assert!(out.iter().any(|f| f.timestamp == 42));
     }
 }

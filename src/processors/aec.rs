@@ -381,4 +381,51 @@ mod tests {
         let out = aec.process(frame(AudioSourceType::System, 0.5)).unwrap();
         assert!(out.is_none());
     }
+
+    #[test]
+    fn tuner_freezes_after_stable_high_erle() {
+        let stats = RuntimeStatsHandle::new();
+        let mut aec = AecProcessor::new(config(false, true), stats.clone());
+
+        for _ in 0..8 {
+            let _ = aec.tune_delay_on_the_fly(4.0, Some(10));
+        }
+
+        assert!(aec.tuner_frozen);
+        assert_eq!(aec.applied_delay_ms, aec.tuner_best_delay_ms);
+        assert_eq!(stats.snapshot().aec_tuner.freeze_events, 1);
+    }
+
+    #[test]
+    fn tuner_rolls_back_to_best_when_quality_drops() {
+        let stats = RuntimeStatsHandle::new();
+        let mut aec = AecProcessor::new(config(false, true), stats.clone());
+        aec.applied_delay_ms = 40;
+        aec.tuner_best_delay_ms = 20;
+        aec.tuner_best_erle = Some(5.0);
+        aec.tuner_erle_ema = Some(5.0);
+
+        let tuned = aec.tune_delay_on_the_fly(0.0, Some(10));
+        assert!(tuned);
+        assert_eq!(aec.applied_delay_ms, 20);
+        assert_eq!(stats.snapshot().aec_tuner.rollback_events, 1);
+    }
+
+    #[test]
+    fn tuner_clamps_delay_to_max_bound() {
+        let stats = RuntimeStatsHandle::new();
+        let mut aec = AecProcessor::new(config(false, true), stats);
+        aec.tuner_max_delay_ms = 100;
+        aec.tuner_best_delay_ms = 95;
+        aec.applied_delay_ms = 98;
+        aec.tuner_step_ms = 8;
+        aec.tuner_direction = 1;
+        aec.tuner_best_erle = Some(1.0);
+        aec.tuner_erle_ema = Some(1.0);
+
+        let tuned = aec.tune_delay_on_the_fly(1.0, Some(10));
+        assert!(tuned);
+        assert_eq!(aec.applied_delay_ms, 100);
+        assert!(aec.applied_delay_ms <= aec.tuner_max_delay_ms);
+    }
 }
