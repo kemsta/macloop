@@ -1,0 +1,29 @@
+[package]
+name = "macloop"
+version = "0.1.0"
+edition = "2021"
+description = "Low-latency macOS audio capture and processing for Python"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/kemsta/macloop"
+homepage = "https://github.com/kemsta/macloop"
+
+[lib]
+name = "_macloop"
+crate-type = ["cdylib"]
+
+[features]
+default = ["capture"]
+capture = ["dep:screencapturekit"]
+
+[dependencies]
+pyo3 = { version = "0.28.1", features = ["extension-module"] }
+screencapturekit = { version = "1.5.0", optional = true }
+ringbuf = "0.4.8"
+numpy = { version = "0.28.0" }
+dasp = { version = "0.11.0", features = ["signal", "interpolate"] }
+bytemuck = "1.25"
+anyhow = "1.0.101"
+crossbeam-channel = "0.5.15"
+rubato = "1.0.1"
+webrtc-audio-processing = { version = "2.0.0", features = ["bundled"] }

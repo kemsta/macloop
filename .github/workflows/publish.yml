@@ -1,0 +1,120 @@
+name: Build And Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_to:
+        description: "Repository to publish"
+        required: true
+        default: "testpypi"
+        type: choice
+        options:
+          - testpypi
+          - pypi
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    name: Run pytest
+    runs-on: macos-14
+    env:
+      RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
+      UV_CACHE_DIR: .uv-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+      - name: Set up uv
+      uses: astral-sh/setup-uv@v4
+
+      - name: Run tests
+      run: |
+        uv sync --group dev
+        uv run --reinstall-package macloop pytest -q tests
+
+  build:
+    name: Build wheels and sdist
+    needs: test
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14]
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+
+      - name: Build sdist
+        if: matrix.os == 'macos-14'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to == 'testpypi' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/macloop/
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to == 'pypi') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/macloop/
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

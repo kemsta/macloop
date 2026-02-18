@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+.uv-cache/
+*.pyc
+.DS_Store
+
+# Build artifacts
+target/
+dist/
+build/
+*.egg-info/
+
+# Local extension builds
+macloop/_macloop*.so
+
+# Test outputs
+output_*.wav
+
+# Lock files
+Cargo.lock
+uv.lock

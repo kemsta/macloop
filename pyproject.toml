@@ -1,0 +1,40 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "macloop"
+dynamic = ["version"]
+description = "Low-latency macOS audio capture and processing (AEC/NS) powered by Rust"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Typing :: Typed",
+]
+keywords = ["audio", "macos", "screencapturekit", "webrtc", "aec", "noise-suppression"]
+dependencies = [
+    "numpy>=1.21.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/kemsta/macloop"
+Repository = "https://github.com/kemsta/macloop"
+Issues = "https://github.com/kemsta/macloop/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "."
+module-name = "macloop._macloop"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.4",
+    "pytest-asyncio>=0.21.2",
+]
