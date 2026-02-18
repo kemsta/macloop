@@ -53,6 +53,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
+      ARCHFLAGS: -arch x86_64 -arch arm64
     strategy:
       fail-fast: false
       matrix:
@@ -67,11 +68,14 @@ jobs:
           brew update
           brew install meson ninja pkg-config
 
+      - name: Add Rust targets for universal2
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist
+          args: --release --target universal2-apple-darwin --out dist
 
       - name: Build sdist
         if: matrix.os == 'macos-14'
