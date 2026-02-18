@@ -97,7 +97,7 @@ with macloop.Capture(display_id=display["display_id"], config=cfg) as stream:
 For speech-to-text (ASR), use this short example:
 
 ```bash
-uv run --with sherpa-onnx --with huggingface_hub --reinstall-package macloop \
+uv run --with sherpa-onnx --with huggingface_hub --with macloop \
   python examples/sherpa_asr_demo.py --seconds 5
 ```
 
