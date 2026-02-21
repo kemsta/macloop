@@ -20,13 +20,13 @@ class AudioProcessingConfig:
 
     def __init__(
         self,
-        sample_rate: int = 16000,
-        channels: int = 1,
-        enable_aec: bool = True,
-        enable_ns: bool = True,
+        sample_rate: int = 48000,
+        channels: int = 2,
+        enable_aec: bool = False,
+        enable_ns: bool = False,
         sample_format: str = "f32",
         aec_stream_delay_ms: int = 0,
-        aec_auto_delay_tuning: bool = True,
+        aec_auto_delay_tuning: bool = False,
         aec_max_delay_ms: int = 140,
     ) -> None: ...
 

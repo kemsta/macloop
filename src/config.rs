@@ -25,13 +25,13 @@ pub struct AudioProcessingConfig {
 impl AudioProcessingConfig {
     #[new]
     #[pyo3(signature = (
-        sample_rate=16000, 
-        channels=1, 
-        enable_aec=true, 
-        enable_ns=true, 
+        sample_rate=48000,
+        channels=2,
+        enable_aec=false,
+        enable_ns=false,
         sample_format="f32".to_string(), 
         aec_stream_delay_ms=0,
-        aec_auto_delay_tuning=true,
+        aec_auto_delay_tuning=false,
         aec_max_delay_ms=140
     ))]
     fn new(
