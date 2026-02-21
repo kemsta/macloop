@@ -146,6 +146,13 @@ impl AudioEngine {
 }
 
 #[cfg(all(not(test), feature = "capture"))]
+impl Drop for AudioEngine {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(all(not(test), feature = "capture"))]
 #[pymodule]
 fn _macloop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AudioEngine>()?;

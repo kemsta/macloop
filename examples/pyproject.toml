@@ -1,0 +1,17 @@
+[project]
+name = "examples"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "macloop",
+]
+
+[tool.uv.sources]
+macloop = { index = "pypi-main" }
+
+[[tool.uv.index]]
+name = "pypi-main"
+url = "https://pypi.org/simple"
+default = true

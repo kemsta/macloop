@@ -169,5 +169,13 @@ class Capture:
     def get_stats(self):
         return self._engine.get_stats()
 
+    def __del__(self) -> None:
+        # Best-effort shutdown so macOS capture indicator doesn't linger
+        # when users forget to call stop()/exit context manager.
+        try:
+            self.stop()
+        except Exception:
+            pass
+
 
 __all__ = ["AudioProcessingConfig", "AudioSamples", "AudioChunk", "Capture", "list_audio_sources"]
