@@ -32,6 +32,7 @@ Issues = "https://github.com/kemsta/macloop/issues"
 features = ["pyo3/extension-module", "pyo3/abi3-py39"]
 python-source = "."
 module-name = "macloop._macloop"
+manifest-path = "python_ffi/Cargo.toml"
 
 [dependency-groups]
 dev = [

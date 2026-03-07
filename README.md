@@ -7,6 +7,12 @@
 
 Low-latency macOS audio capture and processing for Python, powered by Rust.
 
+## Workspace Layout
+
+- `core_engine`: pure Rust DSP/runtime pipeline (no Python/GIL references)
+- `python_ffi`: Python bindings + capture/control plane (`macloop._macloop`)
+- `cli_tester`: Rust CLI smoke tester for engine behavior without Python
+
 - System audio and microphone capture via ScreenCaptureKit
 - WebRTC-based AEC (echo cancellation) and NS (noise suppression)
 - Sync and async streaming APIs

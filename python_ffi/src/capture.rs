@@ -1,6 +1,6 @@
 use crossbeam_channel::Sender;
-use crate::messages::{AudioFrame, AudioSourceType};
-use crate::config::AudioProcessingConfig;
+use core_engine::messages::{AudioFrame, AudioSourceType};
+use core_engine::config::AudioProcessingConfig;
 use screencapturekit::prelude::*;
 use screencapturekit::stream::output_trait::SCStreamOutputTrait;
 use anyhow::{Result, anyhow};

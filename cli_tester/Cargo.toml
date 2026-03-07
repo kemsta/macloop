@@ -1,0 +1,10 @@
+[package]
+name = "cli_tester"
+version = "0.1.1"
+edition = "2021"
+description = "Rust CLI for testing core_engine without Python"
+license = "MIT"
+
+[dependencies]
+core_engine = { path = "../core_engine" }
+crossbeam-channel = "0.5.15"
