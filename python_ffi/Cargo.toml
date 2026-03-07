@@ -1,0 +1,26 @@
+[package]
+name = "python_ffi"
+version = "0.1.1"
+edition = "2021"
+description = "Python bindings and control plane for macloop"
+license = "MIT"
+readme = "../README.md"
+repository = "https://github.com/kemsta/macloop"
+homepage = "https://github.com/kemsta/macloop"
+
+[lib]
+name = "_macloop"
+crate-type = ["cdylib"]
+
+[features]
+default = ["capture"]
+capture = ["dep:screencapturekit"]
+
+[dependencies]
+anyhow = "1.0.101"
+bytemuck = "1.25"
+crossbeam-channel = "0.5.15"
+core_engine = { path = "../core_engine" }
+numpy = "0.28.0"
+pyo3 = { version = "0.28.1", features = ["extension-module", "abi3-py39"] }
+screencapturekit = { version = "1.5.0", optional = true }
