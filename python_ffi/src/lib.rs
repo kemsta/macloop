@@ -252,31 +252,30 @@ impl PyAudioEngineBackend {
                 Ok(())
             }
             "application_audio" => {
-                let pids = dict_u32_list(&config, "pids")?;
+                let pid = dict_optional_u32(&config, "pid")?;
                 let display_id = dict_optional_u32(&config, "display_id")?;
 
-                if pids.is_empty() {
-                    return Err(PyValueError::new_err(
-                        "application_audio source requires at least one pid in 'pids'",
-                    ));
-                }
+                let selected_pid = pid.ok_or_else(|| {
+                    PyValueError::new_err("application_audio source requires a pid")
+                })?;
 
                 let pipeline = self
                     .controller
                     .create_stream(
                         stream_id.clone(),
-                        SourceType::ApplicationAudio,
+                        SourceType::ApplicationAudio { pid: selected_pid },
                         DEFAULT_MAX_PROCESSORS,
                         DEFAULT_MAX_OUTPUTS,
                     )
                     .map_err(engine_error)?;
 
-                let source = AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "failed to create application audio source: {e}"
-                        ))
-                    })?;
+                let source =
+                    AppAudioSource::new(pipeline, AppAudioSourceConfig { pid, display_id })
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!(
+                                "failed to create application audio source: {e}"
+                            ))
+                        })?;
 
                 self.sources.insert(
                     stream_id,
@@ -708,13 +707,6 @@ fn dict_optional_u32(config: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u
     match config.get_item(key)? {
         Some(value) => value.extract::<Option<u32>>(),
         None => Ok(None),
-    }
-}
-
-fn dict_u32_list(config: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<u32>> {
-    match config.get_item(key)? {
-        Some(value) => value.extract::<Vec<u32>>(),
-        None => Ok(Vec::new()),
     }
 }
 

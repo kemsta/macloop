@@ -165,19 +165,16 @@ This is the workflow `macloop` is built for: **one pipeline, multiple outputs**.
 import macloop
 
 
-def find_zoom_pids() -> list[int]:
-    pids = []
+def find_zoom_pid() -> int:
     for app in macloop.AppAudioSource.list_applications():
         if "zoom" in app["name"].lower():
-            pids.append(int(app["pid"]))
-    if not pids:
-        raise RuntimeError("Zoom is not running")
-    return pids
+            return int(app["pid"])
+    raise RuntimeError("Zoom is not running")
 
 
 with macloop.AudioEngine() as engine:
     mic = engine.create_stream(macloop.MicrophoneSource, vpio_enabled=True)
-    zoom = engine.create_stream(macloop.AppAudioSource, pids=find_zoom_pids())
+    zoom = engine.create_stream(macloop.AppAudioSource, pid=find_zoom_pid())
 
     mic_for_asr = engine.route("mic_for_asr", stream=mic)
     zoom_for_asr = engine.route("zoom_for_asr", stream=zoom)
@@ -273,7 +270,7 @@ for app in macloop.AppAudioSource.list_applications():
 
 If `engine.create_stream(macloop.SystemAudioSource, ...)` is called without an explicit `display_id`, `macloop` uses the first available display.
 
-`engine.create_stream(macloop.AppAudioSource, ...)` requires explicit `pids`. Use `AppAudioSource.list_applications()` to choose one or more target applications first.
+If `engine.create_stream(macloop.AppAudioSource, ...)` is called without an explicit `pid`, `macloop` uses the first available application returned by `AppAudioSource.list_applications()`.
 
 ---
 
@@ -312,8 +309,10 @@ This makes it possible to inspect latency and drops at the node level instead of
 
 - [ ] Add more built-in processors beyond `GainProcessor`
 - [ ] Add zero-copy / lease-release delivery for Python
+- [ ] Expand sink ecosystem beyond ASR and WAV
 - [ ] Add richer pipeline examples for meeting bots and voice agents
-- [ ] Add WebRTC AEC in a future iteration, with a routing model that can handle capture and reference streams cleanly
+- [ ] Improve device and application selection ergonomics
+- [ ] Add higher-level WebRTC-style processing nodes where the routing model makes sense
 
 ---
 
