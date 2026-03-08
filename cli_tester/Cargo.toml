@@ -8,3 +8,4 @@ license = "MIT"
 [dependencies]
 core_engine = { path = "../core_engine" }
 crossbeam-channel = "0.5.15"
+hound = "3.5.1"

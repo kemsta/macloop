@@ -1,56 +1,203 @@
-use core_engine::config::AudioProcessingConfig;
-use core_engine::messages::{AudioFrame, AudioSourceType};
-use core_engine::modular_pipeline::ModularPipeline;
-use core_engine::stats::RuntimeStatsHandle;
+use core_engine::{
+    AudioEngineController, MicInfo, MicrophoneSource, MicrophoneSourceConfig, SourceType,
+    WavFileOutput, MASTER_FORMAT,
+};
+use std::error::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
-fn build_frame(source: AudioSourceType, timestamp_ns: u64, samples_per_channel: usize, channels: u16) -> AudioFrame {
-    let total = samples_per_channel * channels as usize;
-    let samples = (0..total)
-        .map(|i| ((i as f32 / 10.0).sin() * 0.2).clamp(-1.0, 1.0))
-        .collect::<Vec<_>>();
+#[derive(Debug, Clone)]
+struct CliArgs {
+    out_path: String,
+    seconds: f32,
+    device_id: Option<u32>,
+    list_mics: bool,
+    no_vpio: bool,
+}
 
-    AudioFrame {
-        source,
-        samples,
-        sample_rate: 48_000,
-        channels,
-        timestamp: timestamp_ns,
+impl Default for CliArgs {
+    fn default() -> Self {
+        Self {
+            out_path: "out/mic.wav".to_string(),
+            seconds: 5.0,
+            device_id: None,
+            list_mics: false,
+            no_vpio: false,
+        }
     }
 }
 
-fn main() {
-    let mut cfg = AudioProcessingConfig::default();
-    cfg.sample_rate = 16_000;
-    cfg.channels = 1;
+fn parse_args() -> Result<CliArgs, String> {
+    let mut args = CliArgs::default();
+    let mut it = std::env::args().skip(1);
 
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let (_stop_tx, stop_rx) = crossbeam_channel::bounded(1);
-    let stats = RuntimeStatsHandle::new();
-    let stats_for_thread = stats.clone();
-
-    let worker = std::thread::spawn(move || {
-        let mut out_mic = 0_u64;
-        let mut out_sys = 0_u64;
-        let mut pipeline = ModularPipeline::new(rx, stop_rx, cfg, stats_for_thread);
-        pipeline.run_with_handler(|frame| match frame.source {
-            AudioSourceType::Microphone => out_mic += 1,
-            AudioSourceType::System => out_sys += 1,
-        });
-        (out_mic, out_sys)
-    });
-
-    for i in 0..120_u64 {
-        let ts = i * 10_000_000;
-        let _ = tx.send(build_frame(AudioSourceType::System, ts, 480, 2));
-        let _ = tx.send(build_frame(AudioSourceType::Microphone, ts, 480, 1));
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--out" => {
+                let Some(value) = it.next() else {
+                    return Err("--out requires a path".to_string());
+                };
+                args.out_path = value;
+            }
+            "--seconds" => {
+                let Some(value) = it.next() else {
+                    return Err("--seconds requires a number".to_string());
+                };
+                args.seconds = value
+                    .parse::<f32>()
+                    .map_err(|_| format!("invalid seconds value: {value}"))?;
+            }
+            "--device-id" => {
+                let Some(value) = it.next() else {
+                    return Err("--device-id requires a u32 value".to_string());
+                };
+                args.device_id = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid device-id: {value}"))?,
+                );
+            }
+            "--list-mics" => {
+                args.list_mics = true;
+            }
+            "--no-vpio" => {
+                args.no_vpio = true;
+            }
+            "--help" | "-h" => {
+                return Err(
+                    "Usage: cli_tester [--out PATH] [--seconds N] [--device-id ID] [--list-mics] [--no-vpio]"
+                        .to_string(),
+                );
+            }
+            _ => return Err(format!("unknown argument: {arg}")),
+        }
     }
 
-    drop(tx);
-    let (out_mic, out_sys) = worker.join().expect("pipeline thread panicked");
+    if args.seconds <= 0.0 {
+        return Err("seconds must be > 0".to_string());
+    }
 
-    let snap = stats.snapshot();
-    println!("core_engine smoke test complete");
-    println!("frames in: mic={}, system={}", snap.frames_in_mic, snap.frames_in_system);
-    println!("frames out: mic={}, system={}", out_mic, out_sys);
-    println!("processor_errors={}, drain_errors={}", snap.processor_errors, snap.processor_drain_errors);
+    Ok(args)
+}
+
+fn print_mic_info(mic: &MicInfo) {
+    println!(
+        "  id={} default={} name={}",
+        mic.id, mic.is_default, mic.name
+    );
+}
+
+fn print_mics() {
+    let mics = MicrophoneSource::list_mics();
+    if mics.is_empty() {
+        println!("No microphones found.");
+    } else {
+        println!("Microphones:");
+        for mic in &mics {
+            print_mic_info(mic);
+        }
+    }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), Box<dyn Error>> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
+fn build_single_config(args: &CliArgs) -> MicrophoneSourceConfig {
+    MicrophoneSourceConfig {
+        device_id: args.device_id,
+        vpio_enabled: !args.no_vpio,
+    }
+}
+
+fn record_one_file(
+    out_path: &Path,
+    seconds: f32,
+    mic_cfg: MicrophoneSourceConfig,
+) -> Result<(), Box<dyn Error>> {
+    let mut engine = AudioEngineController::new(
+        64,                                                                        // command queue
+        128,                                                                       // garbage queue
+        MASTER_FORMAT.sample_rate as usize * MASTER_FORMAT.channels as usize * 30, // route ring (~30s)
+    );
+
+    let stream_id = "mic".to_string();
+    let output_id = "wav".to_string();
+
+    let pipeline = engine.create_stream(
+        stream_id.clone(),
+        SourceType::Microphone {
+            device_id: mic_cfg.device_id,
+        },
+        32,
+        8,
+    )?;
+    engine.route(&stream_id, &output_id)?;
+
+    let consumer = engine
+        .take_output_consumer(&output_id)
+        .ok_or("failed to get consumer for WAV output")?;
+
+    let mut wav_out = WavFileOutput::spawn_path(out_path, MASTER_FORMAT, consumer)?;
+    let mut mic = MicrophoneSource::new(pipeline, mic_cfg)?;
+
+    println!(
+        "Capture mode: vpio_enabled={} device_id={:?}",
+        mic_cfg.vpio_enabled, mic_cfg.device_id
+    );
+    println!(
+        "Recording microphone to {} ({} sec)...",
+        out_path.display(),
+        seconds
+    );
+    println!("CASE FLOW: start mic");
+    mic.start()?;
+    thread::sleep(Duration::from_secs_f32(seconds));
+    println!("CASE FLOW: stop mic");
+    mic.stop()?;
+    // Ensure AudioUnit is fully dropped before stopping WAV writer thread.
+    drop(mic);
+    println!("CASE FLOW: stop wav");
+    wav_out.stop()?;
+    println!("CASE FLOW: gc");
+    engine.tick_gc();
+
+    let stats = engine.get_stats();
+    if let Some(s) = stats.get(&stream_id) {
+        println!(
+            "Stats: callback_us={} dropped_frames={} buffer_size={}",
+            s.total_callback_time_us, s.dropped_frames, s.buffer_size
+        );
+    }
+
+    println!("Done: {}", out_path.display());
+    Ok(())
+}
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let args = parse_args().map_err(|e| format!("{e}"))?;
+
+    if args.list_mics {
+        print_mics();
+        return Ok(());
+    }
+
+    let out_path = PathBuf::from(&args.out_path);
+    ensure_parent_dir(&out_path)?;
+    let cfg = build_single_config(&args);
+    record_one_file(&out_path, args.seconds, cfg)
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
 }

@@ -6,7 +6,14 @@ description = "Pure Rust audio processing engine for macloop"
 license = "MIT"
 
 [dependencies]
-anyhow = "1.0.101"
 crossbeam-channel = "0.5.15"
+ringbuf = "0.4.8"
 rubato = "1.0.1"
-webrtc-audio-processing = { version = "2.0.0", features = ["bundled"] }
+audioadapter-buffers = "2.0.0"
+hound = "3.5.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+bytemuck = "1.23.1"
+coreaudio-rs = "0.14.0"
+objc2-audio-toolbox = "0.3.2"
+screencapturekit = "1.5.3"
