@@ -1,5 +1,8 @@
 use crate::engine::RealTimePipeline;
 use crate::format::{StreamFormat, MASTER_FORMAT};
+use crate::sources::screen_capture::{
+    normalize_audio_buffers_into_scratch, select_item_by_id, AudioBufferRef,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayInfo {
@@ -42,6 +45,20 @@ impl std::fmt::Display for SystemAudioError {
 
 impl std::error::Error for SystemAudioError {}
 
+fn select_display<'a, T>(
+    displays: &'a [T],
+    display_id: Option<u32>,
+    id_of: impl Fn(&T) -> u32,
+) -> Result<&'a T, SystemAudioError> {
+    select_item_by_id(
+        displays,
+        display_id,
+        id_of,
+        || SystemAudioError::NoDisplaysAvailable,
+        SystemAudioError::DisplayNotFound,
+    )
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
@@ -62,84 +79,19 @@ mod imp {
 
     impl AudioOutputHandler {
         fn copy_audio_data_into_scratch(audio_data: &AudioBufferList, scratch: &mut Vec<f32>) {
-            scratch.clear();
-            let target_channels = MASTER_FORMAT.channels as usize;
+            let buffers = audio_data
+                .iter()
+                .map(|buffer| AudioBufferRef {
+                    samples: bytemuck::cast_slice::<u8, f32>(buffer.data()),
+                    channels: usize::max(buffer.number_channels as usize, 1),
+                })
+                .collect::<Vec<_>>();
 
-            let Some(first_buffer) = audio_data.get(0) else {
-                return;
-            };
-
-            let num_buffers = audio_data.num_buffers();
-            if num_buffers == 0 {
-                return;
-            }
-
-            if num_buffers == 1 {
-                let samples: &[f32] = bytemuck::cast_slice::<u8, f32>(first_buffer.data());
-                let input_channels = usize::max(first_buffer.number_channels as usize, 1);
-                let frames = samples.len() / input_channels;
-                scratch.reserve(frames * target_channels);
-
-                for frame in samples.chunks_exact(input_channels) {
-                    if input_channels == 1 {
-                        let sample = frame[0];
-                        for _ in 0..target_channels {
-                            scratch.push(sample);
-                        }
-                    } else {
-                        for sample in frame.iter().take(target_channels) {
-                            scratch.push(*sample);
-                        }
-                    }
-                }
-                return;
-            }
-
-            let mut buffers = Vec::with_capacity(num_buffers);
-            let mut frames = usize::MAX;
-            for buffer in audio_data.iter() {
-                let samples: &[f32] = bytemuck::cast_slice::<u8, f32>(buffer.data());
-                let channels = usize::max(buffer.number_channels as usize, 1);
-                frames = frames.min(samples.len() / channels);
-                buffers.push((samples, channels));
-            }
-
-            if frames == usize::MAX || frames == 0 {
-                return;
-            }
-
-            scratch.reserve(frames * target_channels);
-
-            for frame_index in 0..frames {
-                let mut emitted = 0_usize;
-                let mut fallback_sample = 0.0_f32;
-                let mut have_fallback = false;
-
-                for (samples, channels) in &buffers {
-                    let base = frame_index * *channels;
-                    for channel_index in 0..*channels {
-                        let sample = samples[base + channel_index];
-                        if !have_fallback {
-                            fallback_sample = sample;
-                            have_fallback = true;
-                        }
-                        if emitted < target_channels {
-                            scratch.push(sample);
-                            emitted += 1;
-                        }
-                    }
-                    if emitted >= target_channels {
-                        break;
-                    }
-                }
-
-                if have_fallback {
-                    while emitted < target_channels {
-                        scratch.push(fallback_sample);
-                        emitted += 1;
-                    }
-                }
-            }
+            normalize_audio_buffers_into_scratch(
+                &buffers,
+                MASTER_FORMAT.channels as usize,
+                scratch,
+            );
         }
     }
 
@@ -205,19 +157,11 @@ mod imp {
                 SCShareableContent::get().map_err(|e| SystemAudioError::Driver(e.to_string()))?;
 
             let displays = content.displays();
-            let selected_display = match config.display_id {
-                Some(display_id) => displays
-                    .into_iter()
-                    .find(|display| display.display_id() == display_id)
-                    .ok_or(SystemAudioError::DisplayNotFound(display_id))?,
-                None => displays
-                    .into_iter()
-                    .next()
-                    .ok_or(SystemAudioError::NoDisplaysAvailable)?,
-            };
+            let selected_display =
+                select_display(&displays, config.display_id, |display| display.display_id())?;
 
             let filter = SCContentFilter::create()
-                .with_display(&selected_display)
+                .with_display(selected_display)
                 .with_excluding_windows(&[])
                 .build();
 
@@ -304,9 +248,44 @@ pub use imp::SystemAudioSource;
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TestDisplay {
+        id: u32,
+    }
+
     #[test]
     fn default_config_uses_first_available_display() {
         let cfg = SystemAudioSourceConfig::default();
         assert_eq!(cfg.display_id, None);
+    }
+
+    #[test]
+    fn select_display_uses_first_display_by_default() {
+        let displays = [TestDisplay { id: 10 }, TestDisplay { id: 20 }];
+        let selected = select_display(&displays, None, |display| display.id).expect("display");
+
+        assert_eq!(selected.id, 10);
+    }
+
+    #[test]
+    fn select_display_reports_missing_display() {
+        let displays = [TestDisplay { id: 10 }];
+        let err = select_display(&displays, Some(20), |display| display.id).expect_err("missing");
+
+        match err {
+            SystemAudioError::DisplayNotFound(display_id) => assert_eq!(display_id, 20),
+            other => panic!("expected DisplayNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_display_requires_at_least_one_display() {
+        let err = select_display::<TestDisplay>(&[], None, |display| display.id)
+            .expect_err("no displays");
+
+        match err {
+            SystemAudioError::NoDisplaysAvailable => {}
+            other => panic!("expected NoDisplaysAvailable, got {other:?}"),
+        }
     }
 }

@@ -1,5 +1,8 @@
 use crate::engine::RealTimePipeline;
 use crate::format::{StreamFormat, MASTER_FORMAT};
+use crate::sources::screen_capture::{
+    normalize_audio_buffers_into_scratch, select_item_by_id, select_items_by_ids, AudioBufferRef,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationInfo {
@@ -59,6 +62,35 @@ impl std::fmt::Display for AppAudioError {
 
 impl std::error::Error for AppAudioError {}
 
+fn select_display<'a, T>(
+    displays: &'a [T],
+    display_id: Option<u32>,
+    id_of: impl Fn(&T) -> u32,
+) -> Result<&'a T, AppAudioError> {
+    select_item_by_id(
+        displays,
+        display_id,
+        id_of,
+        || AppAudioError::NoDisplaysAvailable,
+        AppAudioError::DisplayNotFound,
+    )
+}
+
+fn select_applications<'a, T>(
+    applications: &'a [T],
+    pids: &[u32],
+    id_of: impl Fn(&T) -> u32,
+) -> Result<Vec<&'a T>, AppAudioError> {
+    select_items_by_ids(
+        applications,
+        pids,
+        id_of,
+        || AppAudioError::NoApplicationsSelected,
+        || AppAudioError::NoApplicationsAvailable,
+        AppAudioError::ApplicationsNotFound,
+    )
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
@@ -79,84 +111,19 @@ mod imp {
 
     impl AudioOutputHandler {
         fn copy_audio_data_into_scratch(audio_data: &AudioBufferList, scratch: &mut Vec<f32>) {
-            scratch.clear();
-            let target_channels = MASTER_FORMAT.channels as usize;
+            let buffers = audio_data
+                .iter()
+                .map(|buffer| AudioBufferRef {
+                    samples: bytemuck::cast_slice::<u8, f32>(buffer.data()),
+                    channels: usize::max(buffer.number_channels as usize, 1),
+                })
+                .collect::<Vec<_>>();
 
-            let Some(first_buffer) = audio_data.get(0) else {
-                return;
-            };
-
-            let num_buffers = audio_data.num_buffers();
-            if num_buffers == 0 {
-                return;
-            }
-
-            if num_buffers == 1 {
-                let samples: &[f32] = bytemuck::cast_slice::<u8, f32>(first_buffer.data());
-                let input_channels = usize::max(first_buffer.number_channels as usize, 1);
-                let frames = samples.len() / input_channels;
-                scratch.reserve(frames * target_channels);
-
-                for frame in samples.chunks_exact(input_channels) {
-                    if input_channels == 1 {
-                        let sample = frame[0];
-                        for _ in 0..target_channels {
-                            scratch.push(sample);
-                        }
-                    } else {
-                        for sample in frame.iter().take(target_channels) {
-                            scratch.push(*sample);
-                        }
-                    }
-                }
-                return;
-            }
-
-            let mut buffers = Vec::with_capacity(num_buffers);
-            let mut frames = usize::MAX;
-            for buffer in audio_data.iter() {
-                let samples: &[f32] = bytemuck::cast_slice::<u8, f32>(buffer.data());
-                let channels = usize::max(buffer.number_channels as usize, 1);
-                frames = frames.min(samples.len() / channels);
-                buffers.push((samples, channels));
-            }
-
-            if frames == usize::MAX || frames == 0 {
-                return;
-            }
-
-            scratch.reserve(frames * target_channels);
-
-            for frame_index in 0..frames {
-                let mut emitted = 0_usize;
-                let mut fallback_sample = 0.0_f32;
-                let mut have_fallback = false;
-
-                for (samples, channels) in &buffers {
-                    let base = frame_index * *channels;
-                    for channel_index in 0..*channels {
-                        let sample = samples[base + channel_index];
-                        if !have_fallback {
-                            fallback_sample = sample;
-                            have_fallback = true;
-                        }
-                        if emitted < target_channels {
-                            scratch.push(sample);
-                            emitted += 1;
-                        }
-                    }
-                    if emitted >= target_channels {
-                        break;
-                    }
-                }
-
-                if have_fallback {
-                    while emitted < target_channels {
-                        scratch.push(fallback_sample);
-                        emitted += 1;
-                    }
-                }
-            }
+            normalize_audio_buffers_into_scratch(
+                &buffers,
+                MASTER_FORMAT.channels as usize,
+                scratch,
+            );
         }
     }
 
@@ -222,44 +189,16 @@ mod imp {
                 SCShareableContent::get().map_err(|e| AppAudioError::Driver(e.to_string()))?;
 
             let displays = content.displays();
-            let selected_display = match config.display_id {
-                Some(display_id) => displays
-                    .into_iter()
-                    .find(|display| display.display_id() == display_id)
-                    .ok_or(AppAudioError::DisplayNotFound(display_id))?,
-                None => displays
-                    .into_iter()
-                    .next()
-                    .ok_or(AppAudioError::NoDisplaysAvailable)?,
-            };
+            let selected_display =
+                select_display(&displays, config.display_id, |display| display.display_id())?;
 
             let applications = content.applications();
-            if config.pids.is_empty() {
-                return Err(AppAudioError::NoApplicationsSelected);
-            }
-
-            if applications.is_empty() {
-                return Err(AppAudioError::NoApplicationsAvailable);
-            }
-
-            let mut selected_apps = Vec::with_capacity(config.pids.len());
-            let mut missing_pids = Vec::new();
-
-            for pid in &config.pids {
-                match applications.iter().find(|app| app.process_id() == *pid as i32) {
-                    Some(app) => selected_apps.push(app.clone()),
-                    None => missing_pids.push(*pid),
-                }
-            }
-
-            if !missing_pids.is_empty() {
-                return Err(AppAudioError::ApplicationsNotFound(missing_pids));
-            }
-
-            let selected_app_refs = selected_apps.iter().collect::<Vec<_>>();
+            let selected_app_refs = select_applications(&applications, &config.pids, |app| {
+                app.process_id().max(0) as u32
+            })?;
 
             let filter = SCContentFilter::create()
-                .with_display(&selected_display)
+                .with_display(selected_display)
                 .with_including_applications(&selected_app_refs, &[])
                 .build();
 
@@ -348,10 +287,71 @@ pub use imp::AppAudioSource;
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TestDisplay {
+        id: u32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TestApplication {
+        pid: u32,
+    }
+
     #[test]
     fn default_config_starts_with_no_selected_applications() {
         let cfg = AppAudioSourceConfig::default();
         assert!(cfg.pids.is_empty());
         assert_eq!(cfg.display_id, None);
+    }
+
+    #[test]
+    fn select_display_uses_first_display_by_default() {
+        let displays = [TestDisplay { id: 10 }, TestDisplay { id: 20 }];
+        let selected = select_display(&displays, None, |display| display.id).expect("display");
+
+        assert_eq!(selected.id, 10);
+    }
+
+    #[test]
+    fn select_applications_requires_non_empty_pid_list() {
+        let apps = [TestApplication { pid: 10 }];
+        let err =
+            select_applications(&apps, &[], |application| application.pid).expect_err("no pids");
+
+        match err {
+            AppAudioError::NoApplicationsSelected => {}
+            other => panic!("expected NoApplicationsSelected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_applications_reports_missing_pids() {
+        let apps = [TestApplication { pid: 10 }, TestApplication { pid: 20 }];
+        let err = select_applications(&apps, &[10, 30], |application| application.pid)
+            .expect_err("missing pids");
+
+        match err {
+            AppAudioError::ApplicationsNotFound(pids) => assert_eq!(pids, vec![30]),
+            other => panic!("expected ApplicationsNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_applications_preserves_requested_order() {
+        let apps = [
+            TestApplication { pid: 10 },
+            TestApplication { pid: 20 },
+            TestApplication { pid: 30 },
+        ];
+        let selected = select_applications(&apps, &[30, 10], |application| application.pid)
+            .expect("select apps");
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|application| application.pid)
+                .collect::<Vec<_>>(),
+            vec![30, 10]
+        );
     }
 }
