@@ -151,11 +151,11 @@ class AppAudioSource:
         self,
         id: Optional[str] = None,
         *,
-        pid: Optional[int] = None,
+        pids: Optional[Sequence[int]] = None,
         display_id: Optional[int] = None,
     ) -> None:
         self.id = id
-        self.pid = pid
+        self.pids = list(pids) if pids is not None else None
         self.display_id = display_id
 
     @staticmethod
@@ -166,20 +166,24 @@ class AppAudioSource:
     def _resolve_backend_spec_kwargs(
         cls,
         *,
-        pid: Optional[int] = None,
+        pids: Optional[Sequence[int]] = None,
         display_id: Optional[int] = None,
         **kwargs: Any,
     ) -> tuple[str, dict[str, Any]]:
         _raise_on_unexpected_kwargs("AppAudioSource", kwargs)
-        if pid is None:
+        if pids is None:
             raise ValueError(
-                "AppAudioSource requires an explicit pid; use AppAudioSource.list_applications() to choose one"
+                "AppAudioSource requires explicit pids; use AppAudioSource.list_applications() to choose them"
             )
+
+        normalized_pids = list(dict.fromkeys(int(pid) for pid in pids))
+        if not normalized_pids:
+            raise ValueError("AppAudioSource requires at least one pid in pids")
 
         return (
             "application_audio",
             {
-                "pid": pid,
+                "pids": normalized_pids,
                 "display_id": display_id,
             },
         )

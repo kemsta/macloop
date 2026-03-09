@@ -18,7 +18,7 @@ pub type RouteConsumer = HeapCons<f32>;
 pub enum SourceType {
     Microphone { device_id: Option<u32> },
     SystemAudio,
-    ApplicationAudio { pid: u32 },
+    ApplicationAudio,
     Synthetic,
 }
 
