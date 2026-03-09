@@ -5,6 +5,15 @@ edition = "2021"
 description = "Rust CLI for testing core_engine without Python"
 license = "MIT"
 
+[features]
+default = []
+cli-tester = []
+
+[[bin]]
+name = "cli_tester"
+path = "src/main.rs"
+required-features = ["cli-tester"]
+
 [dependencies]
 core_engine = { path = "../core_engine" }
 crossbeam-channel = "0.5.15"
