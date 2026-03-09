@@ -48,13 +48,13 @@ class SystemAudioSource:
 
 class AppAudioSource:
     id: Optional[str]
-    pid: Optional[int]
+    pids: Optional[Sequence[int]]
     display_id: Optional[int]
     def __init__(
         self,
         id: Optional[str] = None,
         *,
-        pid: Optional[int] = None,
+        pids: Optional[Sequence[int]] = None,
         display_id: Optional[int] = None,
     ) -> None: ...
     @staticmethod

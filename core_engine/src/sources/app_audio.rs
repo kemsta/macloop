@@ -9,9 +9,9 @@ pub struct ApplicationInfo {
     pub is_default: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AppAudioSourceConfig {
-    pub pid: Option<u32>,
+    pub pids: Vec<u32>,
     pub display_id: Option<u32>,
 }
 
@@ -19,7 +19,8 @@ pub struct AppAudioSourceConfig {
 pub enum AppAudioError {
     UnsupportedPlatform,
     NoApplicationsAvailable,
-    ApplicationNotFound(u32),
+    NoApplicationsSelected,
+    ApplicationsNotFound(Vec<u32>),
     NoDisplaysAvailable,
     DisplayNotFound(u32),
     Driver(String),
@@ -34,8 +35,16 @@ impl std::fmt::Display for AppAudioError {
             Self::NoApplicationsAvailable => {
                 write!(f, "no applications are available for audio capture")
             }
-            Self::ApplicationNotFound(pid) => {
-                write!(f, "application with pid {pid} was not found")
+            Self::NoApplicationsSelected => {
+                write!(f, "at least one application pid must be provided")
+            }
+            Self::ApplicationsNotFound(pids) => {
+                let joined = pids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "application pid(s) not found: {joined}")
             }
             Self::NoDisplaysAvailable => {
                 write!(f, "no displays are available for application audio capture")
@@ -183,7 +192,7 @@ mod imp {
         stream: SCStream,
         pub input_format: StreamFormat,
         pub output_format: StreamFormat,
-        pub pid: u32,
+        pub pids: Vec<u32>,
         pub display_id: u32,
     }
 
@@ -225,20 +234,33 @@ mod imp {
             };
 
             let applications = content.applications();
-            let selected_app = match config.pid {
-                Some(pid) => applications
-                    .into_iter()
-                    .find(|app| app.process_id() == pid as i32)
-                    .ok_or(AppAudioError::ApplicationNotFound(pid))?,
-                None => applications
-                    .into_iter()
-                    .next()
-                    .ok_or(AppAudioError::NoApplicationsAvailable)?,
-            };
+            if config.pids.is_empty() {
+                return Err(AppAudioError::NoApplicationsSelected);
+            }
+
+            if applications.is_empty() {
+                return Err(AppAudioError::NoApplicationsAvailable);
+            }
+
+            let mut selected_apps = Vec::with_capacity(config.pids.len());
+            let mut missing_pids = Vec::new();
+
+            for pid in &config.pids {
+                match applications.iter().find(|app| app.process_id() == *pid as i32) {
+                    Some(app) => selected_apps.push(app.clone()),
+                    None => missing_pids.push(*pid),
+                }
+            }
+
+            if !missing_pids.is_empty() {
+                return Err(AppAudioError::ApplicationsNotFound(missing_pids));
+            }
+
+            let selected_app_refs = selected_apps.iter().collect::<Vec<_>>();
 
             let filter = SCContentFilter::create()
                 .with_display(&selected_display)
-                .with_including_applications(&[&selected_app], &[])
+                .with_including_applications(&selected_app_refs, &[])
                 .build();
 
             let mut stream_config = SCStreamConfiguration::new();
@@ -268,7 +290,7 @@ mod imp {
                 stream,
                 input_format: MASTER_FORMAT,
                 output_format: MASTER_FORMAT,
-                pid: selected_app.process_id().max(0) as u32,
+                pids: config.pids,
                 display_id: selected_display.display_id(),
             })
         }
@@ -294,7 +316,7 @@ mod imp {
     pub struct AppAudioSource {
         pub input_format: StreamFormat,
         pub output_format: StreamFormat,
-        pub pid: u32,
+        pub pids: Vec<u32>,
         pub display_id: u32,
     }
 
@@ -327,9 +349,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_uses_first_available_application() {
+    fn default_config_starts_with_no_selected_applications() {
         let cfg = AppAudioSourceConfig::default();
-        assert_eq!(cfg.pid, None);
+        assert!(cfg.pids.is_empty());
         assert_eq!(cfg.display_id, None);
     }
 }

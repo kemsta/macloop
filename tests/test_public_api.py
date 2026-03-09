@@ -106,12 +106,27 @@ def test_audio_engine_defaults_system_audio_to_first_display(macloop_module) -> 
         )
 
 
-def test_audio_engine_requires_explicit_app_audio_pid(macloop_module) -> None:
+def test_audio_engine_requires_explicit_app_audio_pids(macloop_module) -> None:
     with macloop_module.AudioEngine() as engine:
-        with pytest.raises(ValueError, match="requires an explicit pid"):
+        with pytest.raises(ValueError, match="requires explicit pids"):
             engine.create_stream(macloop_module.AppAudioSource)
 
         assert engine._backend.calls == []
+
+
+def test_audio_engine_supports_multi_app_audio_source(macloop_module) -> None:
+    with macloop_module.AudioEngine() as engine:
+        stream = engine.create_stream(
+            macloop_module.AppAudioSource,
+            pids=[111, 222, 111],
+        )
+
+        assert engine._backend.calls[0] == (
+            "create_stream",
+            stream.id,
+            "application_audio",
+            {"pids": [111, 222], "display_id": None},
+        )
 
 
 def test_audio_engine_rejects_unknown_source_kwargs(macloop_module) -> None:

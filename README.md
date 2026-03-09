@@ -165,16 +165,19 @@ This is the workflow `macloop` is built for: **one pipeline, multiple outputs**.
 import macloop
 
 
-def find_zoom_pid() -> int:
+def find_zoom_pids() -> list[int]:
+    pids = []
     for app in macloop.AppAudioSource.list_applications():
         if "zoom" in app["name"].lower():
-            return int(app["pid"])
-    raise RuntimeError("Zoom is not running")
+            pids.append(int(app["pid"]))
+    if not pids:
+        raise RuntimeError("Zoom is not running")
+    return pids
 
 
 with macloop.AudioEngine() as engine:
     mic = engine.create_stream(macloop.MicrophoneSource, vpio_enabled=True)
-    zoom = engine.create_stream(macloop.AppAudioSource, pid=find_zoom_pid())
+    zoom = engine.create_stream(macloop.AppAudioSource, pids=find_zoom_pids())
 
     mic_for_asr = engine.route("mic_for_asr", stream=mic)
     zoom_for_asr = engine.route("zoom_for_asr", stream=zoom)
@@ -270,7 +273,7 @@ for app in macloop.AppAudioSource.list_applications():
 
 If `engine.create_stream(macloop.SystemAudioSource, ...)` is called without an explicit `display_id`, `macloop` uses the first available display.
 
-`engine.create_stream(macloop.AppAudioSource, ...)` requires an explicit `pid`. Use `AppAudioSource.list_applications()` to choose the target application first.
+`engine.create_stream(macloop.AppAudioSource, ...)` requires explicit `pids`. Use `AppAudioSource.list_applications()` to choose one or more target applications first.
 
 ---
 

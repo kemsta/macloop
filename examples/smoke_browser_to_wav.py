@@ -47,7 +47,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Manual smoke test: capture browser application audio into a WAV file. "
-            "All matching apps are captured and mixed into one output."
+            "All matching apps are captured through one application-audio stream."
         )
     )
     parser.add_argument("--seconds", type=float, default=5.0, help="How long to record.")
@@ -96,22 +96,23 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with macloop.AudioEngine() as engine:
-        routes = []
+        selected_pids: list[int] = []
         print("Capturing application audio from:")
         for app in matched_apps:
             pid = int(app["pid"])
+            selected_pids.append(pid)
             print(f'  pid={pid} name={app["name"]} bundle_id={app["bundle_id"]}')
-            stream = engine.create_stream(
-                macloop.AppAudioSource,
-                f"app_{pid}",
-                pid=pid,
-            )
-            routes.append(engine.route(f"app_route_{pid}", stream=stream))
+        stream = engine.create_stream(
+            macloop.AppAudioSource,
+            "apps_capture",
+            pids=selected_pids,
+        )
+        route = engine.route("apps_capture_route", stream=stream)
 
-        wav_sink = macloop.WavSink(routes=routes, file=output)
+        wav_sink = macloop.WavSink(route=route, file=output)
         print(
             f"Recording browser audio to {output.resolve()} for {args.seconds:.1f}s "
-            f"from {len(routes)} stream(s)"
+            f"from {len(selected_pids)} application(s)"
         )
         time.sleep(args.seconds)
         wav_sink.close()
