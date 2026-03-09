@@ -5,6 +5,3 @@ members = [
     "cli_tester",
 ]
 resolver = "2"
-
-[patch.crates-io]
-screencapturekit = { path = "vendor/screencapturekit" }
