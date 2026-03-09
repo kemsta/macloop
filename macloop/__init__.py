@@ -172,10 +172,9 @@ class AppAudioSource:
     ) -> tuple[str, dict[str, Any]]:
         _raise_on_unexpected_kwargs("AppAudioSource", kwargs)
         if pid is None:
-            applications = cls.list_applications()
-            if not applications:
-                raise RuntimeError("no applications are available for application audio capture")
-            pid = int(applications[0]["pid"])
+            raise ValueError(
+                "AppAudioSource requires an explicit pid; use AppAudioSource.list_applications() to choose one"
+            )
 
         return (
             "application_audio",

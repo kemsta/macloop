@@ -270,7 +270,7 @@ for app in macloop.AppAudioSource.list_applications():
 
 If `engine.create_stream(macloop.SystemAudioSource, ...)` is called without an explicit `display_id`, `macloop` uses the first available display.
 
-If `engine.create_stream(macloop.AppAudioSource, ...)` is called without an explicit `pid`, `macloop` uses the first available application returned by `AppAudioSource.list_applications()`.
+`engine.create_stream(macloop.AppAudioSource, ...)` requires an explicit `pid`. Use `AppAudioSource.list_applications()` to choose the target application first.
 
 ---
 
@@ -309,10 +309,8 @@ This makes it possible to inspect latency and drops at the node level instead of
 
 - [ ] Add more built-in processors beyond `GainProcessor`
 - [ ] Add zero-copy / lease-release delivery for Python
-- [ ] Expand sink ecosystem beyond ASR and WAV
 - [ ] Add richer pipeline examples for meeting bots and voice agents
-- [ ] Improve device and application selection ergonomics
-- [ ] Add higher-level WebRTC-style processing nodes where the routing model makes sense
+- [ ] Add WebRTC AEC in a future iteration, with a routing model that can handle capture and reference streams cleanly
 
 ---
 
