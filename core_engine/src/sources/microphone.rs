@@ -55,6 +55,16 @@ impl From<InputConversionError> for MicrophoneError {
     }
 }
 
+fn validate_microphone_config(config: MicrophoneSourceConfig) -> Result<(), MicrophoneError> {
+    if config.vpio_enabled && config.device_id.is_some() {
+        return Err(MicrophoneError::InvalidConfig(
+            "device_id is not supported when vpio_enabled=true; disable VPIO to select an explicit input device".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
@@ -189,11 +199,7 @@ mod imp {
             mut pipeline: RealTimePipeline,
             config: MicrophoneSourceConfig,
         ) -> Result<Self, MicrophoneError> {
-            if config.vpio_enabled && config.device_id.is_some() {
-                return Err(MicrophoneError::InvalidConfig(
-                    "device_id is not supported when vpio_enabled=true; disable VPIO to select an explicit input device".to_string(),
-                ));
-            }
+            validate_microphone_config(config)?;
 
             let mut audio_unit = if config.vpio_enabled {
                 let mut au = AudioUnit::new(IOType::VoiceProcessingIO)
@@ -364,5 +370,21 @@ mod tests {
         let cfg = MicrophoneSourceConfig::default();
         assert_eq!(cfg.device_id, None);
         assert!(cfg.vpio_enabled);
+    }
+
+    #[test]
+    fn explicit_device_is_rejected_when_vpio_is_enabled() {
+        let err = validate_microphone_config(MicrophoneSourceConfig {
+            device_id: Some(42),
+            vpio_enabled: true,
+        })
+        .expect_err("invalid microphone config");
+
+        match err {
+            MicrophoneError::InvalidConfig(message) => {
+                assert!(message.contains("device_id is not supported"));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
     }
 }
