@@ -66,7 +66,7 @@ jobs:
           export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
           cargo test --workspace
           uv run --reinstall-package macloop pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
-          cargo llvm-cov report --workspace --lcov --output-path rust-lcov.info
+          cargo llvm-cov report --lcov --output-path rust-lcov.info
 
       - name: Upload coverage to Codecov
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
