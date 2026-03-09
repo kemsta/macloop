@@ -63,6 +63,7 @@ jobs:
           SWIFT_RUSTFLAGS="$RUSTFLAGS"
           cargo llvm-cov clean --workspace
           source <(cargo llvm-cov show-env --export-prefix)
+          export CARGO_TARGET_DIR="${CARGO_LLVM_COV_TARGET_DIR:-target/llvm-cov-target}"
           export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
           cargo llvm-cov --workspace --no-report
           uv run maturin develop --manifest-path python_ffi/Cargo.toml
