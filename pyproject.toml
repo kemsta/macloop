@@ -36,6 +36,8 @@ manifest-path = "python_ffi/Cargo.toml"
 
 [dependency-groups]
 dev = [
+    "maturin>=1.0,<2.0",
     "pytest>=7.4.4",
     "pytest-asyncio>=0.21.2",
+    "pytest-cov>=5.0.0",
 ]

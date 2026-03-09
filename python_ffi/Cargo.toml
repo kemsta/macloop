@@ -15,4 +15,4 @@ crate-type = ["cdylib"]
 [dependencies]
 core_engine = { path = "../core_engine" }
 numpy = "0.28.0"
-pyo3 = { version = "0.28.2", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.28.2", features = ["abi3-py39"] }
