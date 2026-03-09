@@ -65,7 +65,8 @@ jobs:
           source <(cargo llvm-cov show-env --export-prefix)
           export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
           cargo llvm-cov --workspace --no-report
-          uv run --reinstall-package macloop pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
+          uv run maturin develop --manifest-path python_ffi/Cargo.toml
+          uv run pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
           cargo llvm-cov report --lcov --output-path rust-lcov.info
 
       - name: Upload coverage to Codecov
