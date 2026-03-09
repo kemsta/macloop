@@ -157,23 +157,19 @@ fn record_one_file(
         out_path.display(),
         seconds
     );
-    println!("CASE FLOW: start mic");
     mic.start()?;
     thread::sleep(Duration::from_secs_f32(seconds));
-    println!("CASE FLOW: stop mic");
     mic.stop()?;
     // Ensure AudioUnit is fully dropped before stopping WAV writer thread.
     drop(mic);
-    println!("CASE FLOW: stop wav");
     wav_out.stop()?;
-    println!("CASE FLOW: gc");
     engine.tick_gc();
 
     let stats = engine.get_stats();
     if let Some(s) = stats.get(&stream_id) {
         println!(
             "Stats: callback_us={} dropped_frames={} buffer_size={}",
-            s.total_callback_time_us, s.dropped_frames, s.buffer_size
+            s.pipeline.total_callback_time_us, s.pipeline.dropped_frames, s.pipeline.buffer_size
         );
     }
 

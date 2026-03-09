@@ -79,6 +79,28 @@ mod imp {
 
     impl AudioOutputHandler {
         fn copy_audio_data_into_scratch(audio_data: &AudioBufferList, scratch: &mut Vec<f32>) {
+            if audio_data.num_buffers() == 0 {
+                scratch.clear();
+                return;
+            }
+
+            if audio_data.num_buffers() == 1 {
+                let Some(buffer) = audio_data.get(0) else {
+                    scratch.clear();
+                    return;
+                };
+                let buffer = AudioBufferRef {
+                    samples: bytemuck::cast_slice::<u8, f32>(buffer.data()),
+                    channels: usize::max(buffer.number_channels as usize, 1),
+                };
+                normalize_audio_buffers_into_scratch(
+                    std::slice::from_ref(&buffer),
+                    MASTER_FORMAT.channels as usize,
+                    scratch,
+                );
+                return;
+            }
+
             let buffers = audio_data
                 .iter()
                 .map(|buffer| AudioBufferRef {
