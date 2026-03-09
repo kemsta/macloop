@@ -38,4 +38,5 @@ manifest-path = "python_ffi/Cargo.toml"
 dev = [
     "pytest>=7.4.4",
     "pytest-asyncio>=0.21.2",
+    "pytest-cov>=5.0.0",
 ]

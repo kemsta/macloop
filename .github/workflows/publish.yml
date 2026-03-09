@@ -2,6 +2,7 @@ name: Build And Publish
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     branches:
       - "**"
@@ -41,23 +42,50 @@ jobs:
           uv run --reinstall-package macloop pytest -q tests
 
       - name: Install Rust coverage tooling
-        if: ${{ github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         run: |
           rustup component add llvm-tools-preview
           cargo install cargo-llvm-cov --locked
 
-      - name: Generate Rust coverage report (lcov)
-        if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Generate Python coverage report
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          uv run --reinstall-package macloop pytest \
+            --cov=macloop \
+            --cov-report=xml:python-coverage.xml \
+            --cov-report=term-missing \
+            -q tests
+
+      - name: Generate Rust coverage report (lcov)
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
+        shell: bash
+        run: |
+          SWIFT_RUSTFLAGS="$RUSTFLAGS"
+          cargo llvm-cov clean --workspace
+          source <(cargo llvm-cov show-env --export-prefix)
+          export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
+          cargo test --workspace
+          uv run --reinstall-package macloop pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
+          cargo llvm-cov report --workspace --lcov --output-path rust-lcov.info
 
       - name: Upload coverage to Codecov
-        if: ${{ github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: lcov.info
+          files: rust-lcov.info
           flags: rust
+          disable_search: true
+          fail_ci_if_error: false
+
+      - name: Upload Python coverage to Codecov
+        if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: python-coverage.xml
+          flags: python
+          disable_search: true
           fail_ci_if_error: false
 
   build:
