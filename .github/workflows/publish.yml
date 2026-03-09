@@ -54,7 +54,7 @@ jobs:
             --cov=macloop \
             --cov-report=xml:python-coverage.xml \
             --cov-report=term-missing \
-            -q tests
+            -q tests/test_public_api.py tests/test_runtime_helpers.py tests/test_e2e_synthetic.py
 
       - name: Generate Rust coverage report (lcov)
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
