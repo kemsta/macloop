@@ -162,3 +162,127 @@ impl PyWavSinkStats {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core_engine::{
+        AsrInputMetricsSnapshot, LatencyHistogramSnapshot, NodeMetricsSnapshot,
+        PipelineMetricsSnapshot, StreamMetricsSnapshot, WavSinkMetricsSnapshot,
+    };
+
+    fn with_python<T>(f: impl FnOnce(Python<'_>) -> T) -> T {
+        Python::initialize();
+        Python::attach(f)
+    }
+
+    fn sample_latency() -> LatencyHistogramSnapshot {
+        LatencyHistogramSnapshot {
+            last_us: 7,
+            max_us: 13,
+            count: 5,
+            bucket_bounds_us: vec![1, 2, 4, 8, 16],
+            buckets: vec![0, 1, 1, 2, 1],
+            p50_us: 8,
+            p90_us: 16,
+            p95_us: 16,
+            p99_us: 16,
+        }
+    }
+
+    #[test]
+    fn latency_stats_conversion_preserves_values() {
+        let stats = PyLatencyStats::from(sample_latency());
+        assert_eq!(stats.last_us, 7);
+        assert_eq!(stats.max_us, 13);
+        assert_eq!(stats.count, 5);
+        assert_eq!(stats.bucket_bounds_us, vec![1, 2, 4, 8, 16]);
+        assert_eq!(stats.buckets, vec![0, 1, 1, 2, 1]);
+        assert_eq!(stats.p95_us, 16);
+    }
+
+    #[test]
+    fn stream_stats_conversion_preserves_pipeline_and_processors() {
+        with_python(|py| {
+            let stream = PyStreamStats::from_snapshot(
+                py,
+                StreamMetricsSnapshot {
+                    pipeline: PipelineMetricsSnapshot {
+                        total_callback_time_us: 11,
+                        dropped_frames: 2,
+                        buffer_size: 256,
+                        latency: sample_latency(),
+                    },
+                    processors: std::iter::once((
+                        "gain".to_string(),
+                        NodeMetricsSnapshot {
+                            processing_time_us: 3,
+                            max_processing_time_us: 9,
+                            latency: sample_latency(),
+                        },
+                    ))
+                    .collect(),
+                },
+            )
+            .unwrap();
+
+            let pipeline = stream.pipeline.bind(py).borrow();
+            assert_eq!(pipeline.total_callback_time_us, 11);
+            assert_eq!(pipeline.dropped_frames, 2);
+            assert_eq!(pipeline.buffer_size, 256);
+            let pipeline_latency = pipeline.latency.bind(py).borrow();
+            assert_eq!(pipeline_latency.p90_us, 16);
+
+            let processors = stream.processors.bind(py);
+            assert_eq!(processors.len(), 1);
+            let gain = processors
+                .get_item("gain")
+                .unwrap()
+                .unwrap()
+                .extract::<Py<PyProcessorStats>>()
+                .unwrap();
+            let gain = gain.bind(py).borrow();
+            assert_eq!(gain.processing_time_us, 3);
+            assert_eq!(gain.max_processing_time_us, 9);
+        });
+    }
+
+    #[test]
+    fn sink_stats_conversion_preserves_values() {
+        with_python(|py| {
+            let asr = PyAsrInputStats::from_snapshot(
+                py,
+                AsrInputMetricsSnapshot {
+                    chunks_emitted: 4,
+                    frames_emitted: 640,
+                    pending_frames: 32,
+                    poll: sample_latency(),
+                    callback: sample_latency(),
+                },
+            )
+            .unwrap();
+            assert_eq!(asr.chunks_emitted, 4);
+            assert_eq!(asr.frames_emitted, 640);
+            assert_eq!(asr.pending_frames, 32);
+            assert_eq!(asr.poll.bind(py).borrow().p50_us, 8);
+            assert_eq!(asr.callback.bind(py).borrow().p99_us, 16);
+
+            let wav = PyWavSinkStats::from_snapshot(
+                py,
+                WavSinkMetricsSnapshot {
+                    write_calls: 6,
+                    samples_written: 1200,
+                    frames_written: 600,
+                    write: sample_latency(),
+                    finalize: sample_latency(),
+                },
+            )
+            .unwrap();
+            assert_eq!(wav.write_calls, 6);
+            assert_eq!(wav.samples_written, 1200);
+            assert_eq!(wav.frames_written, 600);
+            assert_eq!(wav.write.bind(py).borrow().last_us, 7);
+            assert_eq!(wav.finalize.bind(py).borrow().max_us, 13);
+        });
+    }
+}

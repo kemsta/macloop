@@ -271,12 +271,13 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let source = AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "failed to create application audio source: {e}"
-                        ))
-                    })?;
+                let source =
+                    AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!(
+                                "failed to create application audio source: {e}"
+                            ))
+                        })?;
 
                 self.sources.insert(
                     stream_id,
@@ -815,4 +816,120 @@ fn _macloop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_asr_sink, m)?)?;
     m.add_function(wrap_pyfunction!(create_wav_sink, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::PyDict;
+
+    fn with_python<T>(f: impl FnOnce(Python<'_>) -> T) -> T {
+        Python::initialize();
+        Python::attach(f)
+    }
+
+    #[test]
+    fn parse_sample_format_accepts_supported_values() {
+        assert!(matches!(parse_sample_format("f32"), Ok(SampleFormat::F32)));
+        assert!(matches!(parse_sample_format("F32"), Ok(SampleFormat::F32)));
+        assert!(matches!(parse_sample_format("i16"), Ok(SampleFormat::I16)));
+        assert!(matches!(parse_sample_format("I16"), Ok(SampleFormat::I16)));
+    }
+
+    #[test]
+    fn parse_sample_format_rejects_unsupported_values() {
+        Python::initialize();
+        let err = parse_sample_format("u8").unwrap_err();
+        assert!(err.to_string().contains("unsupported sample_format 'u8'"));
+    }
+
+    #[test]
+    fn duplicate_file_descriptor_rejects_negative_fd() {
+        let err = duplicate_file_descriptor(-1).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn dict_helpers_extract_values_and_defaults() {
+        with_python(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("device_id", 7).unwrap();
+            dict.set_item("pids", vec![11_u32, 22_u32]).unwrap();
+            dict.set_item("enabled", true).unwrap();
+            dict.set_item("size", 123_usize).unwrap();
+            dict.set_item("delay_ms", 45_u64).unwrap();
+            dict.set_item("gain", 1.5_f32).unwrap();
+
+            assert_eq!(dict_optional_u32(&dict, "device_id").unwrap(), Some(7));
+            assert_eq!(dict_optional_u32(&dict, "missing").unwrap(), None);
+            assert_eq!(dict_u32_list(&dict, "pids").unwrap(), vec![11, 22]);
+            assert_eq!(dict_u32_list(&dict, "missing").unwrap(), Vec::<u32>::new());
+            assert!(dict_bool_with_default(&dict, "enabled", false).unwrap());
+            assert!(dict_bool_with_default(&dict, "missing", true).unwrap());
+            assert_eq!(dict_usize_with_default(&dict, "size", 9).unwrap(), 123);
+            assert_eq!(dict_usize_with_default(&dict, "missing", 9).unwrap(), 9);
+            assert_eq!(dict_u64_with_default(&dict, "delay_ms", 1).unwrap(), 45);
+            assert_eq!(dict_u64_with_default(&dict, "missing", 1).unwrap(), 1);
+            assert_eq!(dict_f32_with_default(&dict, "gain", 0.5).unwrap(), 1.5);
+            assert_eq!(dict_f32_with_default(&dict, "missing", 0.5).unwrap(), 0.5);
+        });
+    }
+
+    #[test]
+    fn backend_rejects_unsupported_source_kind() {
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            let config = PyDict::new(py);
+            let err = backend
+                .create_stream("stream".to_string(), "nope".to_string(), config)
+                .unwrap_err();
+            assert!(err.to_string().contains("unsupported source_kind 'nope'"));
+        });
+    }
+
+    #[test]
+    fn backend_requires_application_audio_pids() {
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            let config = PyDict::new(py);
+            let err = backend
+                .create_stream(
+                    "app_stream".to_string(),
+                    "application_audio".to_string(),
+                    config,
+                )
+                .unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("requires at least one pid in 'pids'"));
+        });
+    }
+
+    #[test]
+    fn backend_rejects_unsupported_processor_kind() {
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            let config = PyDict::new(py);
+            let err = backend
+                .add_processor(
+                    "stream".to_string(),
+                    "processor".to_string(),
+                    "nope".to_string(),
+                    config,
+                )
+                .unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("unsupported processor_kind 'nope'"));
+        });
+    }
+
+    #[test]
+    fn backend_close_marks_engine_closed() {
+        Python::initialize();
+        let mut backend = PyAudioEngineBackend::new();
+        backend.close().unwrap();
+        let err = backend.ensure_open().unwrap_err();
+        assert!(err.to_string().contains("audio engine backend is closed"));
+    }
 }
