@@ -1,100 +1,106 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, TypeAlias
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
 
-AudioSamples: TypeAlias = npt.NDArray[np.int16] | npt.NDArray[np.float32]
+AudioSamples = Union[npt.NDArray[np.int16], npt.NDArray[np.float32]]
 
 
-class AudioProcessingConfig:
-    sample_rate: int
-    channels: int
-    enable_aec: bool
-    enable_ns: bool
-    sample_format: str
-    aec_stream_delay_ms: int
-    aec_auto_delay_tuning: bool
-    aec_max_delay_ms: int
-
-    def __init__(
-        self,
-        sample_rate: int = 48000,
-        channels: int = 2,
-        enable_aec: bool = False,
-        enable_ns: bool = False,
-        sample_format: str = "f32",
-        aec_stream_delay_ms: int = 0,
-        aec_auto_delay_tuning: bool = False,
-        aec_max_delay_ms: int = 140,
-    ) -> None: ...
-
-    def calibrate_delay(self, measured_system_latency_ms: float, measured_mic_latency_ms: float) -> None: ...
+class LatencyStats:
+    last_us: int
+    max_us: int
+    count: int
+    bucket_bounds_us: list[int]
+    buckets: list[int]
+    p50_us: int
+    p90_us: int
+    p95_us: int
+    p99_us: int
 
 
 class PipelineStats:
-    frames_in_mic: int
-    frames_in_system: int
-    frames_out_mic: int
-    frames_out_system: int
-    processor_errors: int
-    processor_drain_errors: int
-    callback_errors: int
-    gil_acquire_failures: int
-
-    timestamp_avg_ms: float
-    timestamp_max_ms: float
-    webrtc_resample_avg_ms: float
-    webrtc_resample_max_ms: float
-    quantizer_avg_ms: float
-    quantizer_max_ms: float
-    aec_avg_ms: float
-    aec_max_ms: float
-    ns_avg_ms: float
-    ns_max_ms: float
-    processing_avg_ms: float
-    processing_max_ms: float
-    total_pipeline_avg_ms: float
-    total_pipeline_max_ms: float
-
-    aec_tune_enabled: bool
-    aec_tune_frozen: bool
-    aec_applied_delay_ms: int
-    aec_best_delay_ms: int
-    aec_step_ms: int
-    aec_direction: int
-    aec_interval_frames: int
-    aec_max_delay_ms: int
-    aec_last_erle: Optional[float]
-    aec_erle_ema: Optional[float]
-    aec_best_erle: Optional[float]
-    aec_last_apm_delay_ms: Optional[int]
-    aec_tune_events: int
-    aec_rollback_events: int
-    aec_freeze_events: int
-    aec_skipped_inactive_mic: int
-    aec_skipped_inactive_system: int
+    total_callback_time_us: int
+    dropped_frames: int
+    buffer_size: int
+    latency: LatencyStats
 
 
-class AudioEngine:
-    def __init__(
+class ProcessorStats:
+    processing_time_us: int
+    max_processing_time_us: int
+    latency: LatencyStats
+
+
+class StreamStats:
+    pipeline: PipelineStats
+    processors: dict[str, ProcessorStats]
+
+
+class _AsrSinkBackend:
+    def stats(self) -> dict[str, AsrInputStats]: ...
+    def close(self) -> None: ...
+
+
+class _WavSinkBackend:
+    def stats(self) -> WavSinkStats: ...
+    def close(self) -> None: ...
+
+
+class AsrInputStats:
+    chunks_emitted: int
+    frames_emitted: int
+    pending_frames: int
+    poll: LatencyStats
+    callback: LatencyStats
+
+
+class WavSinkStats:
+    write_calls: int
+    samples_written: int
+    frames_written: int
+    write: LatencyStats
+    finalize: LatencyStats
+
+
+class _AudioEngineBackend:
+    def __init__(self) -> None: ...
+    def create_stream(
         self,
-        display_id: Optional[int] = None,
-        pid: Optional[int] = None,
-        config: Optional[AudioProcessingConfig] = None,
+        stream_id: str,
+        source_kind: str,
+        config: dict[str, Any],
     ) -> None: ...
-
-    def start(
+    def add_processor(
         self,
-        callback: Callable[[str, AudioSamples], None],
-        capture_system: bool = True,
-        capture_mic: bool = False,
+        stream_id: str,
+        processor_id: str,
+        processor_kind: str,
+        config: dict[str, Any],
     ) -> None: ...
+    def route(self, route_id: str, stream_id: str) -> None: ...
+    def get_stats(self) -> dict[str, StreamStats]: ...
+    def close(self) -> None: ...
 
-    def stop(self) -> None: ...
 
-    def get_stats(self) -> PipelineStats: ...
-
-
-def list_audio_sources() -> list[dict[str, Any]]: ...
+def list_microphones() -> list[dict[str, Any]]: ...
+def list_displays() -> list[dict[str, Any]]: ...
+def list_applications() -> list[dict[str, Any]]: ...
+def _create_asr_sink(
+    engine: _AudioEngineBackend,
+    sink_id: str,
+    route_ids: list[str],
+    sample_rate: int,
+    channels: int,
+    sample_format: str,
+    chunk_frames: int,
+    callback: Callable[[str, int, AudioSamples], None],
+) -> _AsrSinkBackend: ...
+def _create_wav_sink(
+    engine: _AudioEngineBackend,
+    sink_id: str,
+    route_ids: list[str],
+    fd: int,
+    mix_gain: float,
+) -> _WavSinkBackend: ...

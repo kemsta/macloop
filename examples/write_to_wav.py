@@ -2,87 +2,48 @@ from __future__ import annotations
 
 import argparse
 import time
-import wave
 from pathlib import Path
 
-import numpy as np
+try:
+    import macloop
+except ModuleNotFoundError:
+    from _bootstrap import bootstrap_repo_root
 
-import macloop
-
-
-def open_wav_writer(path: Path, sample_rate: int, channels: int) -> wave.Wave_write:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wf = wave.open(str(path), "wb")
-    wf.setnchannels(channels)
-    wf.setsampwidth(2)  # int16
-    wf.setframerate(sample_rate)
-    return wf
+    bootstrap_repo_root()
+    import macloop
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Capture display system audio and microphone into separate WAV files (sync API)."
-    )
-    parser.add_argument("--display-id", type=int, default=1, help="Display ID to capture system audio from.")
-    parser.add_argument("--seconds", type=float, default=8.0, help="How long to capture.")
-    parser.add_argument("--sample-rate", type=int, default=48_000, help="Output sample rate.")
-    parser.add_argument("--channels", type=int, default=1, choices=[1, 2], help="Output channel count.")
-    parser.add_argument("--system-out", default="out/display1_system.wav", help="Output WAV for system audio.")
-    parser.add_argument("--mic-out", default="out/display1_mic.wav", help="Output WAV for microphone audio.")
+    parser = argparse.ArgumentParser(description="Capture microphone audio into a WAV file.")
+    parser.add_argument("--seconds", type=float, default=5.0, help="How long to record.")
+    parser.add_argument("--device-id", type=int, default=None, help="Optional microphone device id.")
+    parser.add_argument("--output", default="out/mic.wav", help="Output WAV path.")
+    parser.add_argument("--list-mics", action="store_true", help="List available microphones and exit.")
     args = parser.parse_args()
 
-    sources = macloop.list_audio_sources()
-    display_ids = {s["display_id"] for s in sources if s.get("type") == "display" and "display_id" in s}
-    if args.display_id not in display_ids:
-        raise RuntimeError(
-            f"Display {args.display_id} not found. Available display IDs: {sorted(display_ids)}"
+    if args.list_mics:
+        for mic in macloop.MicrophoneSource.list_devices():
+            print(mic["id"], mic["name"], "(default)" if mic["is_default"] else "")
+        return
+
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    vpio_enabled = args.device_id is None
+
+    with macloop.AudioEngine() as engine:
+        mic = engine.create_stream(
+            macloop.MicrophoneSource,
+            device_id=args.device_id,
+            vpio_enabled=vpio_enabled,
         )
+        mic_for_wav = engine.route(stream=mic)
+        wav_sink = macloop.WavSink(route=mic_for_wav, file=output)
 
-    cfg = macloop.AudioProcessingConfig(
-        sample_rate=args.sample_rate,
-        channels=args.channels,
-        sample_format="i16",
-        enable_aec=False,
-        enable_ns=False,
-    )
+        print(f"Recording microphone to {output.resolve()} for {args.seconds:.1f}s...")
+        time.sleep(args.seconds)
+        wav_sink.close()
 
-    sys_count = 0
-    mic_count = 0
-
-    system_out = Path(args.system_out)
-    mic_out = Path(args.mic_out)
-
-    start = time.monotonic()
-    with (
-        open_wav_writer(system_out, args.sample_rate, args.channels) as system_wf,
-        open_wav_writer(mic_out, args.sample_rate, args.channels) as mic_wf,
-        macloop.Capture(
-            display_id=args.display_id,
-            config=cfg,
-            capture_system=True,
-            capture_mic=True,
-        ) as stream,
-    ):
-        for chunk in stream:
-            arr = np.asarray(chunk.samples, dtype=np.int16)
-            if arr.size == 0:
-                if time.monotonic() - start >= args.seconds:
-                    break
-                continue
-
-            if chunk.source == "system":
-                system_wf.writeframes(arr.tobytes())
-                sys_count += 1
-            elif chunk.source == "mic":
-                mic_wf.writeframes(arr.tobytes())
-                mic_count += 1
-
-            if time.monotonic() - start >= args.seconds:
-                break
-
-    print(f"Done. system_chunks={sys_count}, mic_chunks={mic_count}")
-    print(f"System WAV: {system_out.resolve()}")
-    print(f"Mic WAV:    {mic_out.resolve()}")
+    print(f"Done: {output.resolve()}")
 
 
 if __name__ == "__main__":
