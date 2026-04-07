@@ -100,6 +100,11 @@ mod imp {
     use screencapturekit::AudioBufferList;
     use std::cell::RefCell;
 
+    fn get_shareable_content() -> Result<SCShareableContent, AppAudioError> {
+        crate::sources::screen_capture::get_shareable_content_with_timeout()
+            .map_err(AppAudioError::Driver)
+    }
+
     struct HandlerState {
         pipeline: RealTimePipeline,
         scratch: Vec<f32>,
@@ -186,29 +191,26 @@ mod imp {
     }
 
     impl AppAudioSource {
-        pub fn list_applications() -> Vec<ApplicationInfo> {
-            match SCShareableContent::get() {
-                Ok(content) => content
-                    .applications()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, app)| ApplicationInfo {
-                        pid: app.process_id().max(0) as u32,
-                        name: app.application_name(),
-                        bundle_id: app.bundle_identifier(),
-                        is_default: index == 0,
-                    })
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
+        pub fn list_applications() -> Result<Vec<ApplicationInfo>, AppAudioError> {
+            let content = get_shareable_content()?;
+            Ok(content
+                .applications()
+                .into_iter()
+                .enumerate()
+                .map(|(index, app)| ApplicationInfo {
+                    pid: app.process_id().max(0) as u32,
+                    name: app.application_name(),
+                    bundle_id: app.bundle_identifier(),
+                    is_default: index == 0,
+                })
+                .collect())
         }
 
         pub fn new(
             pipeline: RealTimePipeline,
             config: AppAudioSourceConfig,
         ) -> Result<Self, AppAudioError> {
-            let content =
-                SCShareableContent::get().map_err(|e| AppAudioError::Driver(e.to_string()))?;
+            let content = get_shareable_content()?;
 
             let displays = content.displays();
             let selected_display =
@@ -282,8 +284,8 @@ mod imp {
     }
 
     impl AppAudioSource {
-        pub fn list_applications() -> Vec<ApplicationInfo> {
-            Vec::new()
+        pub fn list_applications() -> Result<Vec<ApplicationInfo>, AppAudioError> {
+            Err(AppAudioError::UnsupportedPlatform)
         }
 
         pub fn new(

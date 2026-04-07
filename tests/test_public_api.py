@@ -143,6 +143,34 @@ def test_system_audio_source_get_displays_returns_backend_data(macloop_module) -
     assert displays[1]["width"] == 1920
 
 
+def test_system_audio_source_list_displays_propagates_backend_errors(
+    macloop_module, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        macloop_module,
+        "_list_displays",
+        lambda: (_ for _ in ()).throw(RuntimeError("shareable content timed out")),
+    )
+
+    with pytest.raises(RuntimeError, match="shareable content timed out"):
+        macloop_module.SystemAudioSource.list_displays()
+
+
+def test_audio_engine_system_source_propagates_default_display_lookup_errors(
+    macloop_module, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        macloop_module,
+        "_list_displays",
+        lambda: (_ for _ in ()).throw(RuntimeError("shareable content timed out")),
+    )
+
+    with macloop_module.AudioEngine() as engine:
+        with pytest.raises(RuntimeError, match="shareable content timed out"):
+            engine.create_stream(macloop_module.SystemAudioSource)
+        assert engine._backend.calls == []
+
+
 def test_microphone_source_list_devices_returns_backend_data(macloop_module) -> None:
     microphones = macloop_module.MicrophoneSource.list_devices()
 
@@ -157,6 +185,19 @@ def test_app_audio_source_list_applications_returns_backend_data(macloop_module)
     assert applications[0]["pid"] == 111
     assert applications[0]["is_default"] is True
     assert applications[1]["bundle_id"] == "com.apple.Music"
+
+
+def test_app_audio_source_list_applications_propagates_backend_errors(
+    macloop_module, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        macloop_module,
+        "_list_applications",
+        lambda: (_ for _ in ()).throw(RuntimeError("shareable content timed out")),
+    )
+
+    with pytest.raises(RuntimeError, match="shareable content timed out"):
+        macloop_module.AppAudioSource.list_applications()
 
 
 def test_asr_sink_yields_chunks_and_claims_routes(macloop_module) -> None:

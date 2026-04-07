@@ -20,13 +20,17 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::os::raw::c_int;
-use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const DEFAULT_COMMAND_CAPACITY: usize = 32;
 const DEFAULT_GARBAGE_CAPACITY: usize = 32;
 const DEFAULT_ROUTE_CAPACITY: usize = 4096;
 const DEFAULT_MAX_PROCESSORS: usize = 32;
 const DEFAULT_MAX_OUTPUTS: usize = 16;
+const SCREEN_CAPTURE_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 struct GainProcessorNode {
@@ -58,29 +62,795 @@ enum StreamRuntime {
     Synthetic(SyntheticSource),
 }
 
-impl StreamRuntime {
-    fn start(&mut self) -> Result<(), String> {
-        match self {
-            Self::AppAudio(source) => source.start().map_err(|e| e.to_string()),
-            Self::Microphone(source) => source.start().map_err(|e| e.to_string()),
-            Self::SystemAudio(source) => source.start().map_err(|e| e.to_string()),
-            Self::Synthetic(source) => source.start().map_err(|e| e.to_string()),
-        }
-    }
+struct StreamRuntimeState {
+    runtime: StreamRuntime,
+    started: bool,
+}
 
-    fn stop(&mut self) -> Result<(), String> {
-        match self {
-            Self::AppAudio(source) => source.stop().map_err(|e| e.to_string()),
-            Self::Microphone(source) => source.stop().map_err(|e| e.to_string()),
-            Self::SystemAudio(source) => source.stop().map_err(|e| e.to_string()),
-            Self::Synthetic(source) => source.stop().map_err(|e| e.to_string()),
+type DeferredSourceResult<T> = Arc<Mutex<Option<Result<T, (T, String)>>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingCleanupPhase {
+    Starting,
+    ReadyToStop,
+    Stopping,
+}
+
+struct PendingCleanup<T> {
+    phase: PendingCleanupPhase,
+    completion: DeferredSourceResult<T>,
+    ready: mpsc::Receiver<()>,
+}
+
+impl<T> PendingCleanup<T> {
+    fn ready_to_stop(result: Result<T, (T, String)>) -> Self {
+        let (_ready_tx, ready) = mpsc::sync_channel(1);
+        Self {
+            phase: PendingCleanupPhase::ReadyToStop,
+            completion: Arc::new(Mutex::new(Some(result))),
+            ready,
         }
     }
 }
 
-struct StreamRuntimeState {
+enum PendingRuntimeCleanup {
+    AppAudio(PendingCleanup<AppAudioSource>),
+    SystemAudio(PendingCleanup<SystemAudioSource>),
+}
+
+enum PendingRuntimeCleanupProgress {
+    Cleaned,
+    Failed(String),
+    Pending(PendingRuntimeCleanup),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackendPoisonState {
+    reason: String,
+    timed_out_stream_ids: Vec<String>,
+}
+
+impl BackendPoisonState {
+    fn new(reason: String, timed_out_stream_ids: Vec<String>) -> Self {
+        Self {
+            reason,
+            timed_out_stream_ids,
+        }
+    }
+
+    fn runtime_error_message(&self) -> String {
+        if self.timed_out_stream_ids.is_empty() {
+            format!(
+                "audio engine backend is unusable after a native startup failure: {}",
+                self.reason
+            )
+        } else {
+            format!(
+                "audio engine backend is unusable after a native startup timeout: {} (timed out stream(s): {})",
+                self.reason,
+                self.timed_out_stream_ids.join(", "),
+            )
+        }
+    }
+}
+
+struct RollbackError {
+    poison: BackendPoisonState,
+    cleanup: HashMap<String, PendingRuntimeCleanup>,
+}
+
+struct StartStreamsError {
+    message: String,
+    states: Vec<(String, StreamRuntimeState)>,
+    poison: Option<BackendPoisonState>,
+    cleanup: HashMap<String, PendingRuntimeCleanup>,
+}
+
+enum StartStreamStateError {
+    Recoverable {
+        state: StreamRuntimeState,
+        message: String,
+    },
+    Fatal {
+        state: Option<StreamRuntimeState>,
+        cleanup: Option<PendingRuntimeCleanup>,
+        message: String,
+    },
+}
+
+enum TimedSourceStartError<T> {
+    Recoverable {
+        source: T,
+        message: String,
+    },
+    Fatal {
+        source: Option<T>,
+        cleanup: Option<PendingCleanup<T>>,
+        message: String,
+    },
+}
+
+enum TimedSourceStopError<T> {
+    Recoverable {
+        source: T,
+        message: String,
+    },
+    Fatal {
+        source: Option<T>,
+        cleanup: Option<PendingCleanup<T>>,
+        message: String,
+    },
+}
+
+enum StopStreamRuntimeError {
+    Recoverable {
+        runtime: StreamRuntime,
+        message: String,
+    },
+    Fatal {
+        runtime: Option<StreamRuntime>,
+        cleanup: Option<PendingRuntimeCleanup>,
+        message: String,
+    },
+}
+
+fn remaining_deadline(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+}
+
+fn startup_timeout_message(action: &str, label: &str) -> String {
+    format!(
+        "timed out {action} {label} before the {}s startup deadline elapsed",
+        SCREEN_CAPTURE_START_TIMEOUT.as_secs()
+    )
+}
+
+fn take_deferred_source_result<T>(
+    completion: &DeferredSourceResult<T>,
+) -> Option<Result<T, (T, String)>> {
+    completion
+        .lock()
+        .expect("deferred source result mutex should not be poisoned")
+        .take()
+}
+
+fn wait_for_deferred_source_result<T>(
+    completion: &DeferredSourceResult<T>,
+    ready: &mpsc::Receiver<()>,
+    deadline: Instant,
+) -> Option<Result<T, (T, String)>> {
+    if let Some(result) = take_deferred_source_result(completion) {
+        return Some(result);
+    }
+
+    let timeout = remaining_deadline(deadline)?;
+    match ready.recv_timeout(timeout) {
+        Ok(()) | Err(RecvTimeoutError::Disconnected) => take_deferred_source_result(completion),
+        Err(RecvTimeoutError::Timeout) => None,
+    }
+}
+
+fn start_native_source_with_deadline<T, E, FStart>(
+    mut source: T,
+    label: &'static str,
+    deadline: Instant,
+    start: FStart,
+) -> Result<T, TimedSourceStartError<T>>
+where
+    T: Send + 'static,
+    E: ToString + Send + 'static,
+    FStart: Fn(&mut T) -> Result<(), E> + Send + Copy + 'static,
+{
+    let Some(timeout) = remaining_deadline(deadline) else {
+        return Err(TimedSourceStartError::Fatal {
+            source: Some(source),
+            cleanup: None,
+            message: startup_timeout_message("starting", label),
+        });
+    };
+
+    let completion: DeferredSourceResult<T> = Arc::new(Mutex::new(None));
+    let completion_worker = Arc::clone(&completion);
+    let (ready_tx, ready) = mpsc::sync_channel(1);
+
+    thread::spawn(move || {
+        let result = match start(&mut source) {
+            Ok(()) => Ok(source),
+            Err(err) => Err((source, err.to_string())),
+        };
+
+        *completion_worker
+            .lock()
+            .expect("deferred source result mutex should not be poisoned") = Some(result);
+        let _ = ready_tx.send(());
+    });
+
+    match ready.recv_timeout(timeout) {
+        Ok(()) => match take_deferred_source_result(&completion)
+            .expect("source start completion should be available after readiness signal")
+        {
+            Ok(source) => Ok(source),
+            Err((source, message)) => Err(TimedSourceStartError::Recoverable { source, message }),
+        },
+        Err(RecvTimeoutError::Timeout) => Err(TimedSourceStartError::Fatal {
+            source: None,
+            cleanup: Some(PendingCleanup {
+                phase: PendingCleanupPhase::Starting,
+                completion,
+                ready,
+            }),
+            message: startup_timeout_message("starting", label),
+        }),
+        Err(RecvTimeoutError::Disconnected) => match take_deferred_source_result(&completion) {
+            Some(Ok(source)) => Ok(source),
+            Some(Err((source, message))) => {
+                Err(TimedSourceStartError::Recoverable { source, message })
+            }
+            None => Err(TimedSourceStartError::Fatal {
+                source: None,
+                cleanup: None,
+                message: format!("{label} start worker disconnected unexpectedly"),
+            }),
+        },
+    }
+}
+
+fn progress_pending_cleanup<T, E, FStop>(
+    handle: PendingCleanup<T>,
+    label: &'static str,
+    deadline: Instant,
+    stop: FStop,
+    wrap_cleanup: impl FnOnce(PendingCleanup<T>) -> PendingRuntimeCleanup + Copy,
+) -> PendingRuntimeCleanupProgress
+where
+    T: Send + 'static,
+    E: ToString + Send + 'static,
+    FStop: Fn(&mut T) -> Result<(), E> + Send + Copy + 'static,
+{
+    match handle.phase {
+        PendingCleanupPhase::Starting | PendingCleanupPhase::ReadyToStop => {
+            match wait_for_deferred_source_result(&handle.completion, &handle.ready, deadline) {
+                Some(Ok(source)) => {
+                    match stop_native_source_with_deadline(source, label, deadline, stop) {
+                        Ok(_source) => PendingRuntimeCleanupProgress::Cleaned,
+                        Err(TimedSourceStopError::Recoverable {
+                            source: _source,
+                            message,
+                        }) => PendingRuntimeCleanupProgress::Failed(format!(
+                            "failed to stop timed out {label}: {message}"
+                        )),
+                        Err(TimedSourceStopError::Fatal {
+                            source: _source,
+                            cleanup: Some(cleanup),
+                            message: _,
+                        }) => PendingRuntimeCleanupProgress::Pending(wrap_cleanup(cleanup)),
+                        Err(TimedSourceStopError::Fatal {
+                            source: _source,
+                            cleanup: None,
+                            message,
+                        }) => PendingRuntimeCleanupProgress::Failed(format!(
+                            "failed to stop timed out {label}: {message}"
+                        )),
+                    }
+                }
+                Some(Err((_source, _message))) => PendingRuntimeCleanupProgress::Cleaned,
+                None => PendingRuntimeCleanupProgress::Pending(wrap_cleanup(handle)),
+            }
+        }
+        PendingCleanupPhase::Stopping => {
+            match wait_for_deferred_source_result(&handle.completion, &handle.ready, deadline) {
+                Some(Ok(_source)) => PendingRuntimeCleanupProgress::Cleaned,
+                Some(Err((_source, message))) => PendingRuntimeCleanupProgress::Failed(format!(
+                    "failed to finish stopping timed out {label}: {message}"
+                )),
+                None => PendingRuntimeCleanupProgress::Pending(wrap_cleanup(handle)),
+            }
+        }
+    }
+}
+
+impl PendingRuntimeCleanup {
+    fn try_cleanup_before(self, deadline: Instant) -> PendingRuntimeCleanupProgress {
+        match self {
+            Self::AppAudio(handle) => progress_pending_cleanup(
+                handle,
+                "application audio source",
+                deadline,
+                AppAudioSource::stop,
+                PendingRuntimeCleanup::AppAudio,
+            ),
+            Self::SystemAudio(handle) => progress_pending_cleanup(
+                handle,
+                "system audio source",
+                deadline,
+                SystemAudioSource::stop,
+                PendingRuntimeCleanup::SystemAudio,
+            ),
+        }
+    }
+}
+
+fn pending_cleanup_from_ready_runtime(runtime: StreamRuntime) -> Option<PendingRuntimeCleanup> {
+    match runtime {
+        StreamRuntime::AppAudio(source) => Some(PendingRuntimeCleanup::AppAudio(
+            PendingCleanup::ready_to_stop(Ok(source)),
+        )),
+        StreamRuntime::SystemAudio(source) => Some(PendingRuntimeCleanup::SystemAudio(
+            PendingCleanup::ready_to_stop(Ok(source)),
+        )),
+        StreamRuntime::Microphone(_) | StreamRuntime::Synthetic(_) => None,
+    }
+}
+
+fn cleanup_pending_cleanups_with_deadline(
+    cleanups: HashMap<String, PendingRuntimeCleanup>,
+    deadline: Instant,
+) -> (HashMap<String, PendingRuntimeCleanup>, Option<String>) {
+    let mut remaining = HashMap::new();
+    let mut first_error = None;
+
+    for (stream_id, cleanup) in cleanups {
+        match cleanup.try_cleanup_before(deadline) {
+            PendingRuntimeCleanupProgress::Cleaned => {}
+            PendingRuntimeCleanupProgress::Failed(message) => {
+                if first_error.is_none() {
+                    first_error = Some(format!(
+                        "failed to clean up timed out source for stream '{stream_id}': {message}"
+                    ));
+                }
+            }
+            PendingRuntimeCleanupProgress::Pending(cleanup) => {
+                if first_error.is_none() {
+                    first_error = Some(format!(
+                        "timed out waiting for cleanup of stream '{stream_id}' before the {}s startup deadline elapsed",
+                        SCREEN_CAPTURE_START_TIMEOUT.as_secs()
+                    ));
+                }
+                remaining.insert(stream_id, cleanup);
+            }
+        }
+    }
+
+    (remaining, first_error)
+}
+
+fn start_stream_state_with_deadline(
+    state: StreamRuntimeState,
+    deadline: Instant,
+) -> Result<StreamRuntimeState, StartStreamStateError> {
+    if state.started {
+        return Ok(state);
+    }
+
+    match state.runtime {
+        StreamRuntime::AppAudio(source) => match start_native_source_with_deadline(
+            source,
+            "application audio source",
+            deadline,
+            AppAudioSource::start,
+        ) {
+            Ok(source) => Ok(StreamRuntimeState {
+                runtime: StreamRuntime::AppAudio(source),
+                started: true,
+            }),
+            Err(TimedSourceStartError::Recoverable { source, message }) => {
+                Err(StartStreamStateError::Recoverable {
+                    state: StreamRuntimeState {
+                        runtime: StreamRuntime::AppAudio(source),
+                        started: false,
+                    },
+                    message,
+                })
+            }
+            Err(TimedSourceStartError::Fatal {
+                source,
+                cleanup,
+                message,
+            }) => Err(StartStreamStateError::Fatal {
+                state: source.map(|source| StreamRuntimeState {
+                    runtime: StreamRuntime::AppAudio(source),
+                    started: false,
+                }),
+                cleanup: cleanup.map(PendingRuntimeCleanup::AppAudio),
+                message,
+            }),
+        },
+        StreamRuntime::SystemAudio(source) => match start_native_source_with_deadline(
+            source,
+            "system audio source",
+            deadline,
+            SystemAudioSource::start,
+        ) {
+            Ok(source) => Ok(StreamRuntimeState {
+                runtime: StreamRuntime::SystemAudio(source),
+                started: true,
+            }),
+            Err(TimedSourceStartError::Recoverable { source, message }) => {
+                Err(StartStreamStateError::Recoverable {
+                    state: StreamRuntimeState {
+                        runtime: StreamRuntime::SystemAudio(source),
+                        started: false,
+                    },
+                    message,
+                })
+            }
+            Err(TimedSourceStartError::Fatal {
+                source,
+                cleanup,
+                message,
+            }) => Err(StartStreamStateError::Fatal {
+                state: source.map(|source| StreamRuntimeState {
+                    runtime: StreamRuntime::SystemAudio(source),
+                    started: false,
+                }),
+                cleanup: cleanup.map(PendingRuntimeCleanup::SystemAudio),
+                message,
+            }),
+        },
+        StreamRuntime::Microphone(mut source) => match source.start() {
+            Ok(()) => Ok(StreamRuntimeState {
+                runtime: StreamRuntime::Microphone(source),
+                started: true,
+            }),
+            Err(message) => Err(StartStreamStateError::Recoverable {
+                state: StreamRuntimeState {
+                    runtime: StreamRuntime::Microphone(source),
+                    started: false,
+                },
+                message: message.to_string(),
+            }),
+        },
+        StreamRuntime::Synthetic(mut source) => match source.start() {
+            Ok(()) => Ok(StreamRuntimeState {
+                runtime: StreamRuntime::Synthetic(source),
+                started: true,
+            }),
+            Err(message) => Err(StartStreamStateError::Recoverable {
+                state: StreamRuntimeState {
+                    runtime: StreamRuntime::Synthetic(source),
+                    started: false,
+                },
+                message: message.to_string(),
+            }),
+        },
+    }
+}
+
+fn stop_native_source_with_deadline<T, E, FStop>(
+    source: T,
+    label: &'static str,
+    deadline: Instant,
+    stop: FStop,
+) -> Result<T, TimedSourceStopError<T>>
+where
+    T: Send + 'static,
+    E: ToString + Send + 'static,
+    FStop: Fn(&mut T) -> Result<(), E> + Send + Copy + 'static,
+{
+    let Some(timeout) = remaining_deadline(deadline) else {
+        return Err(TimedSourceStopError::Fatal {
+            source: Some(source),
+            cleanup: None,
+            message: startup_timeout_message("stopping", label),
+        });
+    };
+
+    let completion: DeferredSourceResult<T> = Arc::new(Mutex::new(None));
+    let completion_worker = Arc::clone(&completion);
+    let (ready_tx, ready) = mpsc::sync_channel(1);
+
+    thread::spawn(move || {
+        let mut source = source;
+        let result = match stop(&mut source) {
+            Ok(()) => Ok(source),
+            Err(err) => Err((source, err.to_string())),
+        };
+
+        *completion_worker
+            .lock()
+            .expect("deferred source result mutex should not be poisoned") = Some(result);
+        let _ = ready_tx.send(());
+    });
+
+    match ready.recv_timeout(timeout) {
+        Ok(()) => match take_deferred_source_result(&completion)
+            .expect("source stop completion should be available after readiness signal")
+        {
+            Ok(source) => Ok(source),
+            Err((source, message)) => Err(TimedSourceStopError::Recoverable { source, message }),
+        },
+        Err(RecvTimeoutError::Timeout) => Err(TimedSourceStopError::Fatal {
+            source: None,
+            cleanup: Some(PendingCleanup {
+                phase: PendingCleanupPhase::Stopping,
+                completion,
+                ready,
+            }),
+            message: startup_timeout_message("stopping", label),
+        }),
+        Err(RecvTimeoutError::Disconnected) => match take_deferred_source_result(&completion) {
+            Some(Ok(source)) => Ok(source),
+            Some(Err((source, message))) => {
+                Err(TimedSourceStopError::Recoverable { source, message })
+            }
+            None => Err(TimedSourceStopError::Fatal {
+                source: None,
+                cleanup: None,
+                message: format!("{label} stop worker disconnected unexpectedly"),
+            }),
+        },
+    }
+}
+
+fn stop_stream_runtime_with_deadline(
     runtime: StreamRuntime,
-    started: bool,
+    deadline: Instant,
+) -> Result<StreamRuntime, StopStreamRuntimeError> {
+    match runtime {
+        StreamRuntime::AppAudio(source) => match stop_native_source_with_deadline(
+            source,
+            "application audio source",
+            deadline,
+            AppAudioSource::stop,
+        ) {
+            Ok(source) => Ok(StreamRuntime::AppAudio(source)),
+            Err(TimedSourceStopError::Recoverable { source, message }) => {
+                Err(StopStreamRuntimeError::Recoverable {
+                    runtime: StreamRuntime::AppAudio(source),
+                    message,
+                })
+            }
+            Err(TimedSourceStopError::Fatal {
+                source,
+                cleanup,
+                message,
+            }) => Err(StopStreamRuntimeError::Fatal {
+                runtime: source.map(StreamRuntime::AppAudio),
+                cleanup: cleanup.map(PendingRuntimeCleanup::AppAudio),
+                message,
+            }),
+        },
+        StreamRuntime::SystemAudio(source) => match stop_native_source_with_deadline(
+            source,
+            "system audio source",
+            deadline,
+            SystemAudioSource::stop,
+        ) {
+            Ok(source) => Ok(StreamRuntime::SystemAudio(source)),
+            Err(TimedSourceStopError::Recoverable { source, message }) => {
+                Err(StopStreamRuntimeError::Recoverable {
+                    runtime: StreamRuntime::SystemAudio(source),
+                    message,
+                })
+            }
+            Err(TimedSourceStopError::Fatal {
+                source,
+                cleanup,
+                message,
+            }) => Err(StopStreamRuntimeError::Fatal {
+                runtime: source.map(StreamRuntime::SystemAudio),
+                cleanup: cleanup.map(PendingRuntimeCleanup::SystemAudio),
+                message,
+            }),
+        },
+        StreamRuntime::Microphone(mut source) => match source.stop() {
+            Ok(()) => Ok(StreamRuntime::Microphone(source)),
+            Err(message) => Err(StopStreamRuntimeError::Recoverable {
+                runtime: StreamRuntime::Microphone(source),
+                message: message.to_string(),
+            }),
+        },
+        StreamRuntime::Synthetic(mut source) => match source.stop() {
+            Ok(()) => Ok(StreamRuntime::Synthetic(source)),
+            Err(message) => Err(StopStreamRuntimeError::Recoverable {
+                runtime: StreamRuntime::Synthetic(source),
+                message: message.to_string(),
+            }),
+        },
+    }
+}
+
+fn merge_timed_out_stream_ids(mut timed_out_stream_ids: Vec<String>) -> Vec<String> {
+    timed_out_stream_ids.sort();
+    timed_out_stream_ids.dedup();
+    timed_out_stream_ids
+}
+
+fn rollback_started_states_with_deadline(
+    states: &mut Vec<(String, StreamRuntimeState)>,
+    started_stream_ids: &[String],
+    deadline: Instant,
+) -> Result<(), RollbackError> {
+    for stream_id in started_stream_ids.iter().rev() {
+        let Some(index) = states
+            .iter()
+            .position(|(existing_stream_id, _)| existing_stream_id == stream_id)
+        else {
+            continue;
+        };
+
+        let (_, state) = states.remove(index);
+        match stop_stream_runtime_with_deadline(state.runtime, deadline) {
+            Ok(runtime) => {
+                states.insert(
+                    index,
+                    (
+                        stream_id.clone(),
+                        StreamRuntimeState {
+                            runtime,
+                            started: false,
+                        },
+                    ),
+                );
+            }
+            Err(StopStreamRuntimeError::Recoverable { runtime, message }) => {
+                states.insert(
+                    index,
+                    (
+                        stream_id.clone(),
+                        StreamRuntimeState {
+                            runtime,
+                            started: true,
+                        },
+                    ),
+                );
+                return Err(RollbackError {
+                    poison: BackendPoisonState::new(
+                        format!("failed to roll back source for stream '{stream_id}': {message}"),
+                        Vec::new(),
+                    ),
+                    cleanup: HashMap::new(),
+                });
+            }
+            Err(StopStreamRuntimeError::Fatal {
+                runtime,
+                cleanup,
+                message,
+            }) => {
+                if let Some(runtime) = runtime {
+                    states.insert(
+                        index,
+                        (
+                            stream_id.clone(),
+                            StreamRuntimeState {
+                                runtime,
+                                started: true,
+                            },
+                        ),
+                    );
+                }
+                return Err(RollbackError {
+                    poison: BackendPoisonState::new(
+                        format!("failed to roll back source for stream '{stream_id}': {message}"),
+                        if cleanup.is_some() {
+                            vec![stream_id.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                    ),
+                    cleanup: cleanup
+                        .into_iter()
+                        .map(|cleanup| (stream_id.clone(), cleanup))
+                        .collect::<HashMap<_, _>>(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn start_stream_states_with_timeout(
+    mut states: Vec<(String, StreamRuntimeState)>,
+    timeout: Duration,
+) -> Result<Vec<(String, StreamRuntimeState)>, StartStreamsError> {
+    let deadline = Instant::now() + timeout;
+    let mut started_stream_ids = Vec::<String>::new();
+    let mut index = 0;
+
+    while index < states.len() {
+        if states[index].1.started {
+            index += 1;
+            continue;
+        }
+
+        let stream_id = states[index].0.clone();
+        let (_, state) = states.remove(index);
+        match start_stream_state_with_deadline(state, deadline) {
+            Ok(state) => {
+                states.insert(index, (stream_id.clone(), state));
+                started_stream_ids.push(stream_id);
+                index += 1;
+            }
+            Err(StartStreamStateError::Recoverable { state, message }) => {
+                states.insert(index, (stream_id.clone(), state));
+                let failure_message =
+                    format!("failed to start source for stream '{stream_id}': {message}");
+
+                match rollback_started_states_with_deadline(
+                    &mut states,
+                    &started_stream_ids,
+                    deadline,
+                ) {
+                    Ok(()) => {
+                        return Err(StartStreamsError {
+                            message: failure_message,
+                            states,
+                            poison: None,
+                            cleanup: HashMap::new(),
+                        });
+                    }
+                    Err(rollback) => {
+                        let combined_message =
+                            format!("{failure_message}; {}", rollback.poison.reason);
+                        return Err(StartStreamsError {
+                            message: combined_message.clone(),
+                            states,
+                            poison: Some(BackendPoisonState::new(
+                                combined_message,
+                                rollback.poison.timed_out_stream_ids,
+                            )),
+                            cleanup: rollback.cleanup,
+                        });
+                    }
+                }
+            }
+            Err(StartStreamStateError::Fatal {
+                state,
+                cleanup,
+                message,
+            }) => {
+                if let Some(state) = state {
+                    states.insert(index, (stream_id.clone(), state));
+                }
+
+                let failure_message =
+                    format!("failed to start source for stream '{stream_id}': {message}");
+                let mut cleanup_handles = cleanup
+                    .into_iter()
+                    .map(|cleanup| (stream_id.clone(), cleanup))
+                    .collect::<HashMap<_, _>>();
+                let mut timed_out_stream_ids = if cleanup_handles.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![stream_id.clone()]
+                };
+
+                if let Err(rollback) = rollback_started_states_with_deadline(
+                    &mut states,
+                    &started_stream_ids,
+                    deadline,
+                ) {
+                    cleanup_handles.extend(rollback.cleanup);
+                    timed_out_stream_ids.extend(rollback.poison.timed_out_stream_ids);
+                    let combined_message = format!("{failure_message}; {}", rollback.poison.reason);
+                    return Err(StartStreamsError {
+                        message: combined_message.clone(),
+                        states,
+                        poison: Some(BackendPoisonState::new(
+                            combined_message,
+                            merge_timed_out_stream_ids(timed_out_stream_ids),
+                        )),
+                        cleanup: cleanup_handles,
+                    });
+                }
+
+                return Err(StartStreamsError {
+                    message: failure_message.clone(),
+                    states,
+                    poison: Some(BackendPoisonState::new(
+                        failure_message,
+                        merge_timed_out_stream_ids(timed_out_stream_ids),
+                    )),
+                    cleanup: cleanup_handles,
+                });
+            }
+        }
+    }
+
+    Ok(states)
 }
 
 type DetachedAsrStartResult = Result<AsrSink, (String, Vec<(String, RouteConsumer)>)>;
@@ -202,7 +972,11 @@ struct PyAudioEngineBackend {
     controller: AudioEngineController,
     sources: HashMap<String, StreamRuntimeState>,
     route_streams: HashMap<String, String>,
+    // Timed-out native cleanup may outlive the first close attempt. We retain one best-effort
+    // cleanup handle per stream so later close/drop paths can retry without reopening the backend.
+    pending_cleanups: HashMap<String, PendingRuntimeCleanup>,
     closed: bool,
+    poisoned: Option<BackendPoisonState>,
 }
 
 #[pymethods]
@@ -217,7 +991,9 @@ impl PyAudioEngineBackend {
             ),
             sources: HashMap::new(),
             route_streams: HashMap::new(),
+            pending_cleanups: HashMap::new(),
             closed: false,
+            poisoned: None,
         }
     }
 
@@ -245,22 +1021,28 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let state = py
-                    .detach(move || {
-                        MicrophoneSource::new(
-                            pipeline,
-                            MicrophoneSourceConfig {
-                                device_id,
-                                vpio_enabled,
-                            },
-                        )
-                        .map(|source| StreamRuntimeState {
-                            runtime: StreamRuntime::Microphone(source),
-                            started: false,
-                        })
-                        .map_err(|e| format!("failed to create microphone source: {e}"))
+                let state = match py.detach(move || {
+                    MicrophoneSource::new(
+                        pipeline,
+                        MicrophoneSourceConfig {
+                            device_id,
+                            vpio_enabled,
+                        },
+                    )
+                    .map(|source| StreamRuntimeState {
+                        runtime: StreamRuntime::Microphone(source),
+                        started: false,
                     })
-                    .map_err(PyRuntimeError::new_err)?;
+                    .map_err(|e| format!("failed to create microphone source: {e}"))
+                }) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        return Err(self.rollback_failed_stream_creation(
+                            &stream_id,
+                            PyRuntimeError::new_err(err),
+                        ))
+                    }
+                };
 
                 self.sources.insert(stream_id, state);
                 Ok(())
@@ -285,16 +1067,22 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let state = py
-                    .detach(move || {
-                        AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
-                            .map(|source| StreamRuntimeState {
-                                runtime: StreamRuntime::AppAudio(source),
-                                started: false,
-                            })
-                            .map_err(|e| format!("failed to create application audio source: {e}"))
-                    })
-                    .map_err(PyRuntimeError::new_err)?;
+                let state = match py.detach(move || {
+                    AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
+                        .map(|source| StreamRuntimeState {
+                            runtime: StreamRuntime::AppAudio(source),
+                            started: false,
+                        })
+                        .map_err(|e| format!("failed to create application audio source: {e}"))
+                }) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        return Err(self.rollback_failed_stream_creation(
+                            &stream_id,
+                            PyRuntimeError::new_err(err),
+                        ))
+                    }
+                };
 
                 self.sources.insert(stream_id, state);
                 Ok(())
@@ -312,16 +1100,22 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let state = py
-                    .detach(move || {
-                        SystemAudioSource::new(pipeline, SystemAudioSourceConfig { display_id })
-                            .map(|source| StreamRuntimeState {
-                                runtime: StreamRuntime::SystemAudio(source),
-                                started: false,
-                            })
-                            .map_err(|e| format!("failed to create system audio source: {e}"))
-                    })
-                    .map_err(PyRuntimeError::new_err)?;
+                let state = match py.detach(move || {
+                    SystemAudioSource::new(pipeline, SystemAudioSourceConfig { display_id })
+                        .map(|source| StreamRuntimeState {
+                            runtime: StreamRuntime::SystemAudio(source),
+                            started: false,
+                        })
+                        .map_err(|e| format!("failed to create system audio source: {e}"))
+                }) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        return Err(self.rollback_failed_stream_creation(
+                            &stream_id,
+                            PyRuntimeError::new_err(err),
+                        ))
+                    }
+                };
 
                 self.sources.insert(stream_id, state);
                 Ok(())
@@ -345,26 +1139,32 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let state = py
-                    .detach(move || {
-                        SyntheticSource::new(
-                            pipeline,
-                            SyntheticSourceConfig {
-                                frames_per_callback,
-                                callback_count,
-                                start_value,
-                                step_value,
-                                interval: std::time::Duration::from_millis(interval_ms),
-                                start_delay: std::time::Duration::from_millis(start_delay_ms),
-                            },
-                        )
-                        .map(|source| StreamRuntimeState {
-                            runtime: StreamRuntime::Synthetic(source),
-                            started: false,
-                        })
-                        .map_err(|e| format!("failed to create synthetic source: {e}"))
+                let state = match py.detach(move || {
+                    SyntheticSource::new(
+                        pipeline,
+                        SyntheticSourceConfig {
+                            frames_per_callback,
+                            callback_count,
+                            start_value,
+                            step_value,
+                            interval: std::time::Duration::from_millis(interval_ms),
+                            start_delay: std::time::Duration::from_millis(start_delay_ms),
+                        },
+                    )
+                    .map(|source| StreamRuntimeState {
+                        runtime: StreamRuntime::Synthetic(source),
+                        started: false,
                     })
-                    .map_err(PyValueError::new_err)?;
+                    .map_err(|e| format!("failed to create synthetic source: {e}"))
+                }) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        return Err(self.rollback_failed_stream_creation(
+                            &stream_id,
+                            PyValueError::new_err(err),
+                        ))
+                    }
+                };
 
                 self.sources.insert(stream_id, state);
                 Ok(())
@@ -423,43 +1223,104 @@ impl PyAudioEngineBackend {
     }
 
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.closed {
+        // `closed` means no new public operations are allowed. If native cleanup timed out earlier,
+        // repeated close attempts are still allowed so drop/explicit close can keep retrying the
+        // retained best-effort cleanup handles.
+        if self.closed && self.pending_cleanups.is_empty() {
             return Ok(());
         }
 
-        let sources = std::mem::take(&mut self.sources);
-        let stop_result = py.detach(move || -> Result<(), String> {
+        let sources = if self.closed {
+            HashMap::new()
+        } else {
+            std::mem::take(&mut self.sources)
+        };
+        let pending_cleanups = std::mem::take(&mut self.pending_cleanups);
+        let was_poisoned = self.poisoned.is_some();
+        let (stop_result, remaining_cleanups) = py.detach(move || {
             let mut first_error: Option<String> = None;
+            let deadline = Instant::now() + SCREEN_CAPTURE_START_TIMEOUT;
 
-            for (_, mut source) in sources {
+            let (mut remaining_cleanups, cleanup_error) =
+                cleanup_pending_cleanups_with_deadline(pending_cleanups, deadline);
+            if let Some(err) = cleanup_error {
+                first_error = Some(err);
+            }
+
+            for (stream_id, source) in sources {
                 if !source.started {
                     continue;
                 }
-                if let Err(err) = source.runtime.stop() {
-                    if first_error.is_none() {
-                        first_error = Some(format!("failed to stop source: {err}"));
+                if let Err(err) = stop_stream_runtime_with_deadline(source.runtime, deadline) {
+                    match err {
+                        StopStreamRuntimeError::Recoverable { runtime, message } => {
+                            if let Some(cleanup) = pending_cleanup_from_ready_runtime(runtime) {
+                                remaining_cleanups.insert(stream_id.clone(), cleanup);
+                            }
+                            if first_error.is_none() {
+                                first_error = Some(format!("failed to stop source: {message}"));
+                            }
+                        }
+                        StopStreamRuntimeError::Fatal {
+                            runtime,
+                            cleanup,
+                            message,
+                        } => {
+                            if let Some(runtime) = runtime {
+                                if let Some(cleanup) = pending_cleanup_from_ready_runtime(runtime) {
+                                    remaining_cleanups.insert(stream_id.clone(), cleanup);
+                                }
+                            }
+                            if let Some(cleanup) = cleanup {
+                                remaining_cleanups.insert(stream_id.clone(), cleanup);
+                            }
+                            if first_error.is_none() {
+                                first_error = Some(format!("failed to stop source: {message}"));
+                            }
+                        }
                     }
                 }
             }
 
-            if let Some(err) = first_error {
+            let result = if let Some(err) = first_error {
                 Err(err)
             } else {
                 Ok(())
-            }
+            };
+            (result, remaining_cleanups)
         });
-        self.route_streams.clear();
-        self.controller.tick_gc();
-        self.closed = true;
+        self.pending_cleanups = remaining_cleanups;
 
-        stop_result.map_err(PyRuntimeError::new_err)
+        if !self.closed {
+            self.route_streams.clear();
+            self.controller.tick_gc();
+            self.closed = true;
+        }
+
+        if was_poisoned {
+            Ok(())
+        } else {
+            stop_result.map_err(PyRuntimeError::new_err)
+        }
     }
 }
 
 impl PyAudioEngineBackend {
+    fn rollback_failed_stream_creation(&mut self, stream_id: &str, err: PyErr) -> PyErr {
+        match self.controller.remove_stream(&stream_id.to_string()) {
+            Ok(()) => err,
+            Err(rollback_err) => PyRuntimeError::new_err(format!(
+                "{}; additionally failed to roll back controller stream '{stream_id}': {rollback_err}",
+                err
+            )),
+        }
+    }
+
     fn ensure_open(&self) -> PyResult<()> {
         if self.closed {
             Err(PyRuntimeError::new_err("audio engine backend is closed"))
+        } else if let Some(poison) = &self.poisoned {
+            Err(PyRuntimeError::new_err(poison.runtime_error_message()))
         } else {
             Ok(())
         }
@@ -526,6 +1387,10 @@ impl PyAudioEngineBackend {
         }
     }
 
+    fn store_pending_cleanups(&mut self, cleanups: HashMap<String, PendingRuntimeCleanup>) {
+        self.pending_cleanups.extend(cleanups);
+    }
+
     fn take_route_consumers(
         &mut self,
         route_ids: &[String],
@@ -543,10 +1408,13 @@ impl PyAudioEngineBackend {
         Ok(consumers)
     }
 
-    fn restore_route_consumers(&mut self, consumers: Vec<(String, RouteConsumer)>) {
+    fn restore_route_consumers(&mut self, consumers: Vec<(String, RouteConsumer)>) -> PyResult<()> {
         for (route_id, consumer) in consumers {
-            let _ = self.controller.restore_output_consumer(route_id, consumer);
+            self.controller
+                .restore_output_consumer(route_id, consumer)
+                .map_err(engine_error)?;
         }
+        Ok(())
     }
 
     fn build_asr_sink(
@@ -576,34 +1444,19 @@ impl PyAudioEngineBackend {
         let stream_ids = self.stream_ids_for_routes(&route_ids)?;
         let stream_states = self.take_stream_states(&stream_ids)?;
         let started_states = match py.detach(move || {
-            let mut states = stream_states;
-            let mut started_in_this_call = Vec::<usize>::new();
-            for index in 0..states.len() {
-                if states[index].1.started {
-                    continue;
-                }
-
-                let stream_id = states[index].0.clone();
-                if let Err(err) = states[index].1.runtime.start() {
-                    for started_index in started_in_this_call {
-                        let started_state = &mut states[started_index].1;
-                        let _ = started_state.runtime.stop();
-                        started_state.started = false;
-                    }
-                    return Err((
-                        format!("failed to start source for stream '{stream_id}': {err}"),
-                        states,
-                    ));
-                }
-                states[index].1.started = true;
-                started_in_this_call.push(index);
-            }
-            Ok(states)
+            start_stream_states_with_timeout(stream_states, SCREEN_CAPTURE_START_TIMEOUT)
         }) {
             Ok(states) => states,
-            Err((err, states)) => {
+            Err(StartStreamsError {
+                message,
+                states,
+                poison,
+                cleanup,
+            }) => {
                 self.restore_stream_states(states);
-                return Err(PyRuntimeError::new_err(err));
+                self.store_pending_cleanups(cleanup);
+                self.poisoned = poison;
+                return Err(PyRuntimeError::new_err(message));
             }
         };
         self.restore_stream_states(started_states);
@@ -643,7 +1496,11 @@ impl PyAudioEngineBackend {
                 final_stats: None,
             }),
             Err((err, route_consumers)) => {
-                self.restore_route_consumers(route_consumers);
+                if let Err(restore_err) = self.restore_route_consumers(route_consumers) {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "{err}; additionally failed to restore route consumers: {restore_err}"
+                    )));
+                }
                 Err(PyRuntimeError::new_err(err))
             }
         }
@@ -664,34 +1521,19 @@ impl PyAudioEngineBackend {
         let stream_ids = self.stream_ids_for_routes(&route_ids)?;
         let stream_states = self.take_stream_states(&stream_ids)?;
         let started_states = match py.detach(move || {
-            let mut states = stream_states;
-            let mut started_in_this_call = Vec::<usize>::new();
-            for index in 0..states.len() {
-                if states[index].1.started {
-                    continue;
-                }
-
-                let stream_id = states[index].0.clone();
-                if let Err(err) = states[index].1.runtime.start() {
-                    for started_index in started_in_this_call {
-                        let started_state = &mut states[started_index].1;
-                        let _ = started_state.runtime.stop();
-                        started_state.started = false;
-                    }
-                    return Err((
-                        format!("failed to start source for stream '{stream_id}': {err}"),
-                        states,
-                    ));
-                }
-                states[index].1.started = true;
-                started_in_this_call.push(index);
-            }
-            Ok(states)
+            start_stream_states_with_timeout(stream_states, SCREEN_CAPTURE_START_TIMEOUT)
         }) {
             Ok(states) => states,
-            Err((err, states)) => {
+            Err(StartStreamsError {
+                message,
+                states,
+                poison,
+                cleanup,
+            }) => {
                 self.restore_stream_states(states);
-                return Err(PyRuntimeError::new_err(err));
+                self.store_pending_cleanups(cleanup);
+                self.poisoned = poison;
+                return Err(PyRuntimeError::new_err(message));
             }
         };
         self.restore_stream_states(started_states);
@@ -719,7 +1561,11 @@ impl PyAudioEngineBackend {
                 final_stats: None,
             }),
             Err((err, route_consumers)) => {
-                self.restore_route_consumers(route_consumers);
+                if let Err(restore_err) = self.restore_route_consumers(route_consumers) {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "{err}; additionally failed to restore route consumers: {restore_err}"
+                    )));
+                }
                 Err(PyRuntimeError::new_err(err))
             }
         }
@@ -746,7 +1592,7 @@ fn list_microphones(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
 fn list_displays(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
     let displays = py.detach(SystemAudioSource::list_displays);
     let list = PyList::empty(py);
-    for display in displays {
+    for display in displays.map_err(|e| PyRuntimeError::new_err(e.to_string()))? {
         append_display_info(&list, display)?;
     }
     Ok(list)
@@ -756,7 +1602,7 @@ fn list_displays(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
 fn list_applications(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
     let applications = py.detach(AppAudioSource::list_applications);
     let list = PyList::empty(py);
-    for application in applications {
+    for application in applications.map_err(|e| PyRuntimeError::new_err(e.to_string()))? {
         append_application_info(&list, application)?;
     }
     Ok(list)
@@ -999,6 +1845,138 @@ mod tests {
         });
     }
 
+    #[derive(Debug)]
+    struct DummyTimedSource {
+        start_gate: Option<mpsc::Receiver<()>>,
+        stop_gate: Option<mpsc::Receiver<()>>,
+        started: bool,
+    }
+
+    fn dummy_start(source: &mut DummyTimedSource) -> Result<(), &'static str> {
+        if let Some(rx) = source.start_gate.take() {
+            let _ = rx.recv();
+        }
+        source.started = true;
+        Ok(())
+    }
+
+    fn dummy_stop(source: &mut DummyTimedSource) -> Result<(), &'static str> {
+        if let Some(rx) = source.stop_gate.take() {
+            let _ = rx.recv();
+        }
+        source.started = false;
+        Ok(())
+    }
+
+    fn unresolved_app_cleanup() -> PendingRuntimeCleanup {
+        let (_tx, ready) = mpsc::sync_channel(1);
+        PendingRuntimeCleanup::AppAudio(PendingCleanup {
+            phase: PendingCleanupPhase::Starting,
+            completion: Arc::new(Mutex::new(None)),
+            ready,
+        })
+    }
+
+    #[test]
+    fn start_native_source_timeout_before_spawn_preserves_source() {
+        let err = start_native_source_with_deadline(
+            DummyTimedSource {
+                start_gate: None,
+                stop_gate: None,
+                started: false,
+            },
+            "dummy source",
+            Instant::now(),
+            dummy_start,
+        )
+        .unwrap_err();
+
+        match err {
+            TimedSourceStartError::Fatal {
+                source: Some(source),
+                cleanup: None,
+                ..
+            } => assert!(!source.started),
+            _ => panic!("unexpected start timeout result"),
+        }
+    }
+
+    #[test]
+    fn start_native_source_timeout_returns_pending_cleanup_handle() {
+        let (start_tx, start_rx) = mpsc::channel();
+        let err = start_native_source_with_deadline(
+            DummyTimedSource {
+                start_gate: Some(start_rx),
+                stop_gate: None,
+                started: false,
+            },
+            "dummy source",
+            Instant::now() + Duration::from_millis(10),
+            dummy_start,
+        )
+        .unwrap_err();
+
+        let cleanup = match err {
+            TimedSourceStartError::Fatal {
+                source: None,
+                cleanup: Some(cleanup),
+                ..
+            } => cleanup,
+            _ => panic!("unexpected timed start result"),
+        };
+
+        start_tx.send(()).unwrap();
+        let result = wait_for_deferred_source_result(
+            &cleanup.completion,
+            &cleanup.ready,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("deferred start result");
+
+        match result {
+            Ok(source) => assert!(source.started),
+            Err((_source, message)) => panic!("unexpected deferred start failure: {message}"),
+        }
+    }
+
+    #[test]
+    fn stop_native_source_timeout_returns_pending_cleanup_handle() {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let err = stop_native_source_with_deadline(
+            DummyTimedSource {
+                start_gate: None,
+                stop_gate: Some(stop_rx),
+                started: true,
+            },
+            "dummy source",
+            Instant::now() + Duration::from_millis(10),
+            dummy_stop,
+        )
+        .unwrap_err();
+
+        let cleanup = match err {
+            TimedSourceStopError::Fatal {
+                source: None,
+                cleanup: Some(cleanup),
+                ..
+            } => cleanup,
+            _ => panic!("unexpected timed stop result"),
+        };
+
+        stop_tx.send(()).unwrap();
+        let result = wait_for_deferred_source_result(
+            &cleanup.completion,
+            &cleanup.ready,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("deferred stop result");
+
+        match result {
+            Ok(source) => assert!(!source.started),
+            Err((_source, message)) => panic!("unexpected deferred stop failure: {message}"),
+        }
+    }
+
     #[test]
     fn backend_rejects_unsupported_source_kind() {
         with_python(|py| {
@@ -1050,6 +2028,40 @@ mod tests {
     }
 
     #[test]
+    fn create_stream_failure_rolls_back_controller_state() {
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            let config = PyDict::new(py);
+            config.set_item("frames_per_callback", 0).unwrap();
+
+            let err = backend
+                .create_stream(
+                    py,
+                    "stream_bad".to_string(),
+                    "synthetic".to_string(),
+                    config,
+                )
+                .unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("failed to create synthetic source"));
+            assert!(!backend.sources.contains_key("stream_bad"));
+            assert!(!backend.controller.get_stats().contains_key("stream_bad"));
+
+            let retry_config = PyDict::new(py);
+            backend
+                .create_stream(
+                    py,
+                    "stream_bad".to_string(),
+                    "synthetic".to_string(),
+                    retry_config,
+                )
+                .expect("retry create_stream after constructor failure should succeed");
+            assert!(backend.sources.contains_key("stream_bad"));
+        });
+    }
+
+    #[test]
     fn backend_close_marks_engine_closed() {
         with_python(|py| {
             let mut backend = PyAudioEngineBackend::new();
@@ -1057,5 +2069,76 @@ mod tests {
             let err = backend.ensure_open().unwrap_err();
             assert!(err.to_string().contains("audio engine backend is closed"));
         });
+    }
+
+    #[test]
+    fn backend_close_retries_retained_pending_cleanup() {
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            backend
+                .pending_cleanups
+                .insert("stream_1".to_string(), unresolved_app_cleanup());
+
+            let err = backend.close(py).unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("timed out waiting for cleanup of stream 'stream_1'"));
+            assert!(backend.closed);
+            assert!(backend.pending_cleanups.contains_key("stream_1"));
+
+            let err = backend.close(py).unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("timed out waiting for cleanup of stream 'stream_1'"));
+            assert!(backend.pending_cleanups.contains_key("stream_1"));
+        });
+    }
+
+    #[test]
+    fn poisoned_backend_close_suppresses_cleanup_error_but_retains_cleanup() {
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            backend.poisoned = Some(BackendPoisonState::new(
+                "failed to start source for stream 'stream_1': timed out starting system audio source"
+                    .to_string(),
+                vec!["stream_1".to_string()],
+            ));
+            backend
+                .pending_cleanups
+                .insert("stream_1".to_string(), unresolved_app_cleanup());
+
+            backend.close(py).unwrap();
+            assert!(backend.closed);
+            assert!(backend.pending_cleanups.contains_key("stream_1"));
+
+            backend.close(py).unwrap();
+            assert!(backend.pending_cleanups.contains_key("stream_1"));
+        });
+    }
+
+    #[test]
+    fn backend_poison_state_marks_engine_unusable() {
+        let backend = PyAudioEngineBackend {
+            controller: AudioEngineController::new(
+                DEFAULT_COMMAND_CAPACITY,
+                DEFAULT_GARBAGE_CAPACITY,
+                DEFAULT_ROUTE_CAPACITY,
+            ),
+            sources: HashMap::new(),
+            route_streams: HashMap::new(),
+            pending_cleanups: HashMap::new(),
+            closed: false,
+            poisoned: Some(BackendPoisonState::new(
+                "failed to start source for stream 'stream_1': timed out starting system audio source"
+                    .to_string(),
+                vec!["stream_1".to_string()],
+            )),
+        };
+
+        let err = backend.ensure_open().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("audio engine backend is unusable after a native startup timeout"));
+        assert!(err.to_string().contains("stream_1"));
     }
 }

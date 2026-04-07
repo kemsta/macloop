@@ -68,6 +68,11 @@ mod imp {
     use screencapturekit::AudioBufferList;
     use std::cell::RefCell;
 
+    fn get_shareable_content() -> Result<SCShareableContent, SystemAudioError> {
+        crate::sources::screen_capture::get_shareable_content_with_timeout()
+            .map_err(SystemAudioError::Driver)
+    }
+
     struct HandlerState {
         pipeline: RealTimePipeline,
         scratch: Vec<f32>,
@@ -153,30 +158,27 @@ mod imp {
     }
 
     impl SystemAudioSource {
-        pub fn list_displays() -> Vec<DisplayInfo> {
-            match SCShareableContent::get() {
-                Ok(content) => content
-                    .displays()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, display)| DisplayInfo {
-                        id: display.display_id(),
-                        name: format!("Display {}", display.display_id()),
-                        width: display.width(),
-                        height: display.height(),
-                        is_default: index == 0,
-                    })
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
+        pub fn list_displays() -> Result<Vec<DisplayInfo>, SystemAudioError> {
+            let content = get_shareable_content()?;
+            Ok(content
+                .displays()
+                .into_iter()
+                .enumerate()
+                .map(|(index, display)| DisplayInfo {
+                    id: display.display_id(),
+                    name: format!("Display {}", display.display_id()),
+                    width: display.width(),
+                    height: display.height(),
+                    is_default: index == 0,
+                })
+                .collect())
         }
 
         pub fn new(
             pipeline: RealTimePipeline,
             config: SystemAudioSourceConfig,
         ) -> Result<Self, SystemAudioError> {
-            let content =
-                SCShareableContent::get().map_err(|e| SystemAudioError::Driver(e.to_string()))?;
+            let content = get_shareable_content()?;
 
             let displays = content.displays();
             let selected_display =
@@ -243,8 +245,8 @@ mod imp {
     }
 
     impl SystemAudioSource {
-        pub fn list_displays() -> Vec<DisplayInfo> {
-            Vec::new()
+        pub fn list_displays() -> Result<Vec<DisplayInfo>, SystemAudioError> {
+            Err(SystemAudioError::UnsupportedPlatform)
         }
 
         pub fn new(

@@ -4,6 +4,52 @@ pub(crate) struct AudioBufferRef<'a> {
     pub channels: usize,
 }
 
+#[cfg(target_os = "macos")]
+fn shareable_content_from_retained_ptr(
+    ptr: *const std::ffi::c_void,
+) -> screencapturekit::shareable_content::SCShareableContent {
+    use screencapturekit::shareable_content::SCShareableContent;
+
+    // SAFETY:
+    // - `sc_shareable_content_get_sync` returns the same retained opaque pointer type used by the
+    //   `screencapturekit` crate for `SCShareableContent`.
+    // - `SCShareableContent` is `repr(transparent)` over that pointer in the current dependency.
+    // - We isolate the dependency-layout assumption here so the rest of the discovery path stays
+    //   safe and the invariant is documented in one place.
+    unsafe { std::mem::transmute::<*const std::ffi::c_void, SCShareableContent>(ptr) }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn get_shareable_content_with_timeout(
+) -> Result<screencapturekit::shareable_content::SCShareableContent, String> {
+    use screencapturekit::ffi;
+    use std::ffi::CStr;
+    use std::os::raw::c_char;
+
+    let mut error_buffer = vec![0 as c_char; 1024];
+    let ptr = unsafe {
+        ffi::sc_shareable_content_get_sync(
+            false,
+            false,
+            error_buffer.as_mut_ptr(),
+            error_buffer.len() as isize,
+        )
+    };
+
+    if ptr.is_null() {
+        let error = unsafe { CStr::from_ptr(error_buffer.as_ptr()) }
+            .to_str()
+            .ok()
+            .map(str::trim)
+            .filter(|msg| !msg.is_empty())
+            .unwrap_or("failed to retrieve shareable content")
+            .to_string();
+        return Err(error);
+    }
+
+    Ok(shareable_content_from_retained_ptr(ptr))
+}
+
 pub(crate) fn normalize_audio_buffers_into_scratch(
     buffers: &[AudioBufferRef<'_>],
     target_channels: usize,
