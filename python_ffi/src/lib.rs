@@ -4,8 +4,9 @@ use core_engine::{
     AppAudioSource, AppAudioSourceConfig, ApplicationInfo, AsrChunkView, AsrSampleSlice, AsrSink,
     AsrSinkCallback, AsrSinkConfig, AsrSinkInput, AsrSinkMetricsSnapshot, AudioEngineController,
     AudioProcessor, DisplayInfo, EngineError, MicInfo, MicrophoneSource, MicrophoneSourceConfig,
-    NodeMetrics, SampleFormat, SourceType, StreamFormat, SyntheticSource, SyntheticSourceConfig,
-    SystemAudioSource, SystemAudioSourceConfig, WavFileOutput, WavSinkMetricsSnapshot,
+    NodeMetrics, RouteConsumer, SampleFormat, SourceType, StreamFormat, SyntheticSource,
+    SyntheticSourceConfig, SystemAudioSource, SystemAudioSourceConfig, WavFileOutput,
+    WavSinkMetricsSnapshot,
 };
 use numpy::ToPyArray;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -82,6 +83,10 @@ struct StreamRuntimeState {
     started: bool,
 }
 
+type DetachedAsrStartResult = Result<AsrSink, (String, Vec<(String, RouteConsumer)>)>;
+
+type DetachedWavStartResult = Result<WavFileOutput, (String, Vec<(String, RouteConsumer)>)>;
+
 struct PythonAsrCallback {
     callback: Py<PyAny>,
 }
@@ -129,13 +134,17 @@ impl PyAsrSinkBackend {
         Ok(out)
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         let Some(mut sink) = self.sink.take() else {
             return Ok(());
         };
 
-        let stop_result = sink.stop();
-        self.final_stats = Some(sink.stats());
+        let (stop_result, final_stats) = py.detach(move || {
+            let stop_result = sink.stop().map_err(|e| e.to_string());
+            let final_stats = sink.stats();
+            (stop_result, final_stats)
+        });
+        self.final_stats = Some(final_stats);
         stop_result
             .map_err(|e| PyRuntimeError::new_err(format!("failed to stop asr sink: {e}")))?;
         Ok(())
@@ -144,7 +153,7 @@ impl PyAsrSinkBackend {
 
 impl Drop for PyAsrSinkBackend {
     fn drop(&mut self) {
-        let _ = self.close();
+        let _ = Python::try_attach(|py| self.close(py));
     }
 }
 
@@ -165,13 +174,17 @@ impl PyWavSinkBackend {
         Py::new(py, PyWavSinkStats::from_snapshot(py, snapshot)?)
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         let Some(mut sink) = self.sink.take() else {
             return Ok(());
         };
 
-        let stop_result = sink.stop();
-        self.final_stats = Some(sink.stats());
+        let (stop_result, final_stats) = py.detach(move || {
+            let stop_result = sink.stop().map_err(|e| e.to_string());
+            let final_stats = sink.stats();
+            (stop_result, final_stats)
+        });
+        self.final_stats = Some(final_stats);
         stop_result
             .map_err(|e| PyRuntimeError::new_err(format!("failed to stop wav sink: {e}")))?;
         Ok(())
@@ -180,7 +193,7 @@ impl PyWavSinkBackend {
 
 impl Drop for PyWavSinkBackend {
     fn drop(&mut self) {
-        let _ = self.close();
+        let _ = Python::try_attach(|py| self.close(py));
     }
 }
 
@@ -210,6 +223,7 @@ impl PyAudioEngineBackend {
 
     fn create_stream(
         &mut self,
+        py: Python<'_>,
         stream_id: String,
         source_kind: String,
         config: Bound<'_, PyDict>,
@@ -231,24 +245,24 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let source = MicrophoneSource::new(
-                    pipeline,
-                    MicrophoneSourceConfig {
-                        device_id,
-                        vpio_enabled,
-                    },
-                )
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("failed to create microphone source: {e}"))
-                })?;
+                let state = py
+                    .detach(move || {
+                        MicrophoneSource::new(
+                            pipeline,
+                            MicrophoneSourceConfig {
+                                device_id,
+                                vpio_enabled,
+                            },
+                        )
+                        .map(|source| StreamRuntimeState {
+                            runtime: StreamRuntime::Microphone(source),
+                            started: false,
+                        })
+                        .map_err(|e| format!("failed to create microphone source: {e}"))
+                    })
+                    .map_err(PyRuntimeError::new_err)?;
 
-                self.sources.insert(
-                    stream_id,
-                    StreamRuntimeState {
-                        runtime: StreamRuntime::Microphone(source),
-                        started: false,
-                    },
-                );
+                self.sources.insert(stream_id, state);
                 Ok(())
             }
             "application_audio" => {
@@ -271,21 +285,18 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let source =
-                    AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!(
-                                "failed to create application audio source: {e}"
-                            ))
-                        })?;
+                let state = py
+                    .detach(move || {
+                        AppAudioSource::new(pipeline, AppAudioSourceConfig { pids, display_id })
+                            .map(|source| StreamRuntimeState {
+                                runtime: StreamRuntime::AppAudio(source),
+                                started: false,
+                            })
+                            .map_err(|e| format!("failed to create application audio source: {e}"))
+                    })
+                    .map_err(PyRuntimeError::new_err)?;
 
-                self.sources.insert(
-                    stream_id,
-                    StreamRuntimeState {
-                        runtime: StreamRuntime::AppAudio(source),
-                        started: false,
-                    },
-                );
+                self.sources.insert(stream_id, state);
                 Ok(())
             }
             "system_audio" => {
@@ -301,21 +312,18 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let source =
-                    SystemAudioSource::new(pipeline, SystemAudioSourceConfig { display_id })
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!(
-                                "failed to create system audio source: {e}"
-                            ))
-                        })?;
+                let state = py
+                    .detach(move || {
+                        SystemAudioSource::new(pipeline, SystemAudioSourceConfig { display_id })
+                            .map(|source| StreamRuntimeState {
+                                runtime: StreamRuntime::SystemAudio(source),
+                                started: false,
+                            })
+                            .map_err(|e| format!("failed to create system audio source: {e}"))
+                    })
+                    .map_err(PyRuntimeError::new_err)?;
 
-                self.sources.insert(
-                    stream_id,
-                    StreamRuntimeState {
-                        runtime: StreamRuntime::SystemAudio(source),
-                        started: false,
-                    },
-                );
+                self.sources.insert(stream_id, state);
                 Ok(())
             }
             "synthetic" => {
@@ -337,28 +345,28 @@ impl PyAudioEngineBackend {
                     )
                     .map_err(engine_error)?;
 
-                let source = SyntheticSource::new(
-                    pipeline,
-                    SyntheticSourceConfig {
-                        frames_per_callback,
-                        callback_count,
-                        start_value,
-                        step_value,
-                        interval: std::time::Duration::from_millis(interval_ms),
-                        start_delay: std::time::Duration::from_millis(start_delay_ms),
-                    },
-                )
-                .map_err(|e| {
-                    PyValueError::new_err(format!("failed to create synthetic source: {e}"))
-                })?;
+                let state = py
+                    .detach(move || {
+                        SyntheticSource::new(
+                            pipeline,
+                            SyntheticSourceConfig {
+                                frames_per_callback,
+                                callback_count,
+                                start_value,
+                                step_value,
+                                interval: std::time::Duration::from_millis(interval_ms),
+                                start_delay: std::time::Duration::from_millis(start_delay_ms),
+                            },
+                        )
+                        .map(|source| StreamRuntimeState {
+                            runtime: StreamRuntime::Synthetic(source),
+                            started: false,
+                        })
+                        .map_err(|e| format!("failed to create synthetic source: {e}"))
+                    })
+                    .map_err(PyValueError::new_err)?;
 
-                self.sources.insert(
-                    stream_id,
-                    StreamRuntimeState {
-                        runtime: StreamRuntime::Synthetic(source),
-                        started: false,
-                    },
-                );
+                self.sources.insert(stream_id, state);
                 Ok(())
             }
             _ => Err(PyValueError::new_err(format!(
@@ -414,35 +422,37 @@ impl PyAudioEngineBackend {
         Ok(out)
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.closed {
             return Ok(());
         }
 
-        let mut first_error: Option<PyErr> = None;
+        let sources = std::mem::take(&mut self.sources);
+        let stop_result = py.detach(move || -> Result<(), String> {
+            let mut first_error: Option<String> = None;
 
-        for source in self.sources.values_mut() {
-            if !source.started {
-                continue;
-            }
-            if let Err(err) = source.runtime.stop() {
-                if first_error.is_none() {
-                    first_error = Some(PyRuntimeError::new_err(format!(
-                        "failed to stop source: {err}"
-                    )));
+            for (_, mut source) in sources {
+                if !source.started {
+                    continue;
+                }
+                if let Err(err) = source.runtime.stop() {
+                    if first_error.is_none() {
+                        first_error = Some(format!("failed to stop source: {err}"));
+                    }
                 }
             }
-        }
-        self.sources.clear();
+
+            if let Some(err) = first_error {
+                Err(err)
+            } else {
+                Ok(())
+            }
+        });
         self.route_streams.clear();
         self.controller.tick_gc();
         self.closed = true;
 
-        if let Some(err) = first_error {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        stop_result.map_err(PyRuntimeError::new_err)
     }
 }
 
@@ -471,44 +481,77 @@ impl PyAudioEngineBackend {
         Ok(())
     }
 
-    fn ensure_streams_started_for_routes(&mut self, route_ids: &[String]) -> PyResult<()> {
-        let mut streams_to_start = Vec::<String>::new();
+    fn stream_ids_for_routes(&self, route_ids: &[String]) -> PyResult<Vec<String>> {
+        let mut stream_ids = Vec::<String>::new();
 
         for route_id in route_ids {
             let stream_id = self.route_streams.get(route_id).ok_or_else(|| {
                 PyValueError::new_err(format!("route '{route_id}' is not registered"))
             })?;
 
-            if !streams_to_start
-                .iter()
-                .any(|existing| existing == stream_id)
-            {
-                streams_to_start.push(stream_id.clone());
+            if !stream_ids.iter().any(|existing| existing == stream_id) {
+                stream_ids.push(stream_id.clone());
             }
         }
 
-        for stream_id in streams_to_start {
-            let state = self.sources.get_mut(&stream_id).ok_or_else(|| {
-                PyValueError::new_err(format!("stream '{stream_id}' is not registered"))
-            })?;
+        Ok(stream_ids)
+    }
 
-            if state.started {
-                continue;
+    fn take_stream_states(
+        &mut self,
+        stream_ids: &[String],
+    ) -> PyResult<Vec<(String, StreamRuntimeState)>> {
+        for stream_id in stream_ids {
+            if !self.sources.contains_key(stream_id) {
+                return Err(PyValueError::new_err(format!(
+                    "stream '{stream_id}' is not registered"
+                )));
             }
-
-            state.runtime.start().map_err(|err| {
-                PyRuntimeError::new_err(format!(
-                    "failed to start source for stream '{stream_id}': {err}"
-                ))
-            })?;
-            state.started = true;
         }
 
-        Ok(())
+        let mut states = Vec::with_capacity(stream_ids.len());
+        for stream_id in stream_ids {
+            let state = self
+                .sources
+                .remove(stream_id)
+                .expect("stream state presence checked before removal");
+            states.push((stream_id.clone(), state));
+        }
+        Ok(states)
+    }
+
+    fn restore_stream_states(&mut self, states: Vec<(String, StreamRuntimeState)>) {
+        for (stream_id, state) in states {
+            self.sources.insert(stream_id, state);
+        }
+    }
+
+    fn take_route_consumers(
+        &mut self,
+        route_ids: &[String],
+    ) -> PyResult<Vec<(String, RouteConsumer)>> {
+        self.ensure_route_consumers_available(route_ids)?;
+
+        let mut consumers = Vec::with_capacity(route_ids.len());
+        for route_id in route_ids {
+            let consumer = self
+                .controller
+                .take_output_consumer(route_id)
+                .expect("route consumer presence checked before removal");
+            consumers.push((route_id.clone(), consumer));
+        }
+        Ok(consumers)
+    }
+
+    fn restore_route_consumers(&mut self, consumers: Vec<(String, RouteConsumer)>) {
+        for (route_id, consumer) in consumers {
+            let _ = self.controller.restore_output_consumer(route_id, consumer);
+        }
     }
 
     fn build_asr_sink(
         &mut self,
+        py: Python<'_>,
         route_ids: Vec<String>,
         sample_rate: u32,
         channels: u16,
@@ -530,43 +573,85 @@ impl PyAudioEngineBackend {
         })
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
-        let mut inputs = Vec::with_capacity(route_ids.len());
-        for route_id in &route_ids {
-            let consumer = self
-                .controller
-                .take_output_consumer(route_id)
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!("route '{route_id}' is not available"))
-                })?;
-            inputs.push(AsrSinkInput {
-                input_id: route_id.clone(),
-                consumer,
-            });
+        let stream_ids = self.stream_ids_for_routes(&route_ids)?;
+        let stream_states = self.take_stream_states(&stream_ids)?;
+        let started_states = match py.detach(move || {
+            let mut states = stream_states;
+            let mut started_in_this_call = Vec::<usize>::new();
+            for index in 0..states.len() {
+                if states[index].1.started {
+                    continue;
+                }
+
+                let stream_id = states[index].0.clone();
+                if let Err(err) = states[index].1.runtime.start() {
+                    for started_index in started_in_this_call {
+                        let started_state = &mut states[started_index].1;
+                        let _ = started_state.runtime.stop();
+                        started_state.started = false;
+                    }
+                    return Err((
+                        format!("failed to start source for stream '{stream_id}': {err}"),
+                        states,
+                    ));
+                }
+                states[index].1.started = true;
+                started_in_this_call.push(index);
+            }
+            Ok(states)
+        }) {
+            Ok(states) => states,
+            Err((err, states)) => {
+                self.restore_stream_states(states);
+                return Err(PyRuntimeError::new_err(err));
+            }
+        };
+        self.restore_stream_states(started_states);
+
+        let route_consumers = self.take_route_consumers(&route_ids)?;
+        let detached_result: DetachedAsrStartResult = py.detach(move || {
+            let inputs = route_consumers
+                .into_iter()
+                .map(|(route_id, consumer)| AsrSinkInput {
+                    input_id: route_id,
+                    consumer,
+                })
+                .collect();
+
+            match AsrSink::try_spawn(
+                inputs,
+                AsrSinkConfig {
+                    format,
+                    chunk_frames,
+                },
+                Box::new(PythonAsrCallback { callback }),
+            ) {
+                Ok(sink) => Ok(sink),
+                Err((err, inputs)) => Err((
+                    format!("failed to create asr sink: {err}"),
+                    inputs
+                        .into_iter()
+                        .map(|input| (input.input_id, input.consumer))
+                        .collect(),
+                )),
+            }
+        });
+
+        match detached_result {
+            Ok(sink) => Ok(PyAsrSinkBackend {
+                sink: Some(sink),
+                final_stats: None,
+            }),
+            Err((err, route_consumers)) => {
+                self.restore_route_consumers(route_consumers);
+                Err(PyRuntimeError::new_err(err))
+            }
         }
-
-        let mut sink = AsrSink::spawn(
-            inputs,
-            AsrSinkConfig {
-                format,
-                chunk_frames,
-            },
-            Box::new(PythonAsrCallback { callback }),
-        )
-        .map_err(|err| PyRuntimeError::new_err(format!("failed to create asr sink: {err}")))?;
-
-        if let Err(err) = self.ensure_streams_started_for_routes(&route_ids) {
-            let _ = sink.stop();
-            return Err(err);
-        }
-
-        Ok(PyAsrSinkBackend {
-            sink: Some(sink),
-            final_stats: None,
-        })
     }
 
     fn build_wav_sink(
         &mut self,
+        py: Python<'_>,
         route_ids: Vec<String>,
         fd: i32,
         mix_gain: f32,
@@ -574,50 +659,84 @@ impl PyAudioEngineBackend {
         self.ensure_open()?;
         self.ensure_route_consumers_available(&route_ids)?;
 
-        let mut consumers = Vec::with_capacity(route_ids.len());
-        for route_id in &route_ids {
-            let consumer = self
-                .controller
-                .take_output_consumer(route_id)
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!("route '{route_id}' is not available"))
-                })?;
-            consumers.push(consumer);
-        }
-
         let file = duplicate_file_descriptor(fd)
             .map_err(|e| PyOSError::new_err(format!("failed to duplicate file descriptor: {e}")))?;
+        let stream_ids = self.stream_ids_for_routes(&route_ids)?;
+        let stream_states = self.take_stream_states(&stream_ids)?;
+        let started_states = match py.detach(move || {
+            let mut states = stream_states;
+            let mut started_in_this_call = Vec::<usize>::new();
+            for index in 0..states.len() {
+                if states[index].1.started {
+                    continue;
+                }
 
-        let mut sink = WavFileOutput::spawn_file_mix(
-            file,
-            self.controller.master_format(),
-            consumers,
-            mix_gain,
-        )
-        .map_err(|err| PyRuntimeError::new_err(format!("failed to create wav sink: {err}")))?;
+                let stream_id = states[index].0.clone();
+                if let Err(err) = states[index].1.runtime.start() {
+                    for started_index in started_in_this_call {
+                        let started_state = &mut states[started_index].1;
+                        let _ = started_state.runtime.stop();
+                        started_state.started = false;
+                    }
+                    return Err((
+                        format!("failed to start source for stream '{stream_id}': {err}"),
+                        states,
+                    ));
+                }
+                states[index].1.started = true;
+                started_in_this_call.push(index);
+            }
+            Ok(states)
+        }) {
+            Ok(states) => states,
+            Err((err, states)) => {
+                self.restore_stream_states(states);
+                return Err(PyRuntimeError::new_err(err));
+            }
+        };
+        self.restore_stream_states(started_states);
 
-        if let Err(err) = self.ensure_streams_started_for_routes(&route_ids) {
-            let _ = sink.stop();
-            return Err(err);
+        let route_consumers = self.take_route_consumers(&route_ids)?;
+        let master_format = self.controller.master_format();
+        let detached_result: DetachedWavStartResult = py.detach(move || {
+            let consumers = route_consumers
+                .into_iter()
+                .map(|(_, consumer)| consumer)
+                .collect();
+
+            match WavFileOutput::try_spawn_file_mix(file, master_format, consumers, mix_gain) {
+                Ok(sink) => Ok(sink),
+                Err((err, consumers)) => Err((
+                    format!("failed to create wav sink: {err}"),
+                    route_ids.into_iter().zip(consumers).collect(),
+                )),
+            }
+        });
+
+        match detached_result {
+            Ok(sink) => Ok(PyWavSinkBackend {
+                sink: Some(sink),
+                final_stats: None,
+            }),
+            Err((err, route_consumers)) => {
+                self.restore_route_consumers(route_consumers);
+                Err(PyRuntimeError::new_err(err))
+            }
         }
-
-        Ok(PyWavSinkBackend {
-            sink: Some(sink),
-            final_stats: None,
-        })
     }
 }
 
 impl Drop for PyAudioEngineBackend {
     fn drop(&mut self) {
-        let _ = self.close();
+        let _ = Python::try_attach(|py| self.close(py));
     }
 }
 
 #[pyfunction]
 fn list_microphones(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
+    let microphones = py.detach(MicrophoneSource::list_mics);
     let list = PyList::empty(py);
-    for mic in MicrophoneSource::list_mics() {
+    for mic in microphones {
         append_microphone_info(&list, mic)?;
     }
     Ok(list)
@@ -625,8 +744,9 @@ fn list_microphones(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
 
 #[pyfunction]
 fn list_displays(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
+    let displays = py.detach(SystemAudioSource::list_displays);
     let list = PyList::empty(py);
-    for display in SystemAudioSource::list_displays() {
+    for display in displays {
         append_display_info(&list, display)?;
     }
     Ok(list)
@@ -634,8 +754,9 @@ fn list_displays(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
 
 #[pyfunction]
 fn list_applications(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
+    let applications = py.detach(AppAudioSource::list_applications);
     let list = PyList::empty(py);
-    for application in AppAudioSource::list_applications() {
+    for application in applications {
         append_application_info(&list, application)?;
     }
     Ok(list)
@@ -643,6 +764,7 @@ fn list_applications(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
 
 #[pyfunction(name = "_create_asr_sink")]
 fn create_asr_sink(
+    py: Python<'_>,
     mut engine: PyRefMut<'_, PyAudioEngineBackend>,
     sink_id: String,
     route_ids: Vec<String>,
@@ -654,6 +776,7 @@ fn create_asr_sink(
 ) -> PyResult<PyAsrSinkBackend> {
     let _ = sink_id;
     engine.build_asr_sink(
+        py,
         route_ids,
         sample_rate,
         channels,
@@ -665,6 +788,7 @@ fn create_asr_sink(
 
 #[pyfunction(name = "_create_wav_sink")]
 fn create_wav_sink(
+    py: Python<'_>,
     mut engine: PyRefMut<'_, PyAudioEngineBackend>,
     sink_id: String,
     route_ids: Vec<String>,
@@ -672,7 +796,7 @@ fn create_wav_sink(
     mix_gain: f32,
 ) -> PyResult<PyWavSinkBackend> {
     let _ = sink_id;
-    engine.build_wav_sink(route_ids, fd, mix_gain)
+    engine.build_wav_sink(py, route_ids, fd, mix_gain)
 }
 
 fn append_microphone_info(list: &Bound<'_, PyList>, mic: MicInfo) -> PyResult<()> {
@@ -881,7 +1005,7 @@ mod tests {
             let mut backend = PyAudioEngineBackend::new();
             let config = PyDict::new(py);
             let err = backend
-                .create_stream("stream".to_string(), "nope".to_string(), config)
+                .create_stream(py, "stream".to_string(), "nope".to_string(), config)
                 .unwrap_err();
             assert!(err.to_string().contains("unsupported source_kind 'nope'"));
         });
@@ -894,6 +1018,7 @@ mod tests {
             let config = PyDict::new(py);
             let err = backend
                 .create_stream(
+                    py,
                     "app_stream".to_string(),
                     "application_audio".to_string(),
                     config,
@@ -926,10 +1051,11 @@ mod tests {
 
     #[test]
     fn backend_close_marks_engine_closed() {
-        Python::initialize();
-        let mut backend = PyAudioEngineBackend::new();
-        backend.close().unwrap();
-        let err = backend.ensure_open().unwrap_err();
-        assert!(err.to_string().contains("audio engine backend is closed"));
+        with_python(|py| {
+            let mut backend = PyAudioEngineBackend::new();
+            backend.close(py).unwrap();
+            let err = backend.ensure_open().unwrap_err();
+            assert!(err.to_string().contains("audio engine backend is closed"));
+        });
     }
 }
