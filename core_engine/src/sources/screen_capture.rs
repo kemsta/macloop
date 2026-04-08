@@ -440,14 +440,28 @@ mod tests {
 
     #[test]
     fn normalize_empty_buffers_produces_empty_scratch() {
-        let mut scratch = Vec::new();
+        let mut scratch = vec![99.0, 100.0];
         normalize_audio_buffers_into_scratch(&[], 2, &mut scratch);
         assert!(scratch.is_empty());
     }
 
     #[test]
-    fn normalize_zero_target_channels_produces_empty_scratch() {
+    fn normalize_zero_channel_buffer_treated_as_mono() {
         let mut scratch = Vec::new();
+        normalize_audio_buffers_into_scratch(
+            &[AudioBufferRef {
+                samples: &[1.0, 2.0],
+                channels: 0,
+            }],
+            2,
+            &mut scratch,
+        );
+        assert_eq!(scratch, vec![1.0, 1.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn normalize_zero_target_channels_produces_empty_scratch() {
+        let mut scratch = vec![99.0, 100.0];
         normalize_audio_buffers_into_scratch(
             &[AudioBufferRef {
                 samples: &[1.0, 2.0],
