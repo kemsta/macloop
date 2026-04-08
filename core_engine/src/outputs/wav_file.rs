@@ -96,22 +96,26 @@ pub struct WavFileOutput {
 }
 
 impl WavFileOutput {
-    pub fn spawn_mix<W>(
+    pub fn try_spawn_mix<W>(
         writer: W,
         format: StreamFormat,
         consumers: Vec<RouteConsumer>,
         mix_gain: f32,
-    ) -> Result<Self, WavOutputError>
+    ) -> Result<Self, (WavOutputError, Vec<RouteConsumer>)>
     where
         W: Write + Seek + Send + 'static,
     {
         if consumers.is_empty() {
-            return Err(WavOutputError::Io(
-                "wav sink requires at least one route consumer".to_string(),
+            return Err((
+                WavOutputError::Io("wav sink requires at least one route consumer".to_string()),
+                consumers,
             ));
         }
 
-        let spec = Self::wav_spec(format)?;
+        let spec = match Self::wav_spec(format) {
+            Ok(spec) => spec,
+            Err(err) => return Err((err, consumers)),
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let metrics = Arc::new(WavSinkMetrics::default());
@@ -199,6 +203,18 @@ impl WavFileOutput {
         })
     }
 
+    pub fn spawn_mix<W>(
+        writer: W,
+        format: StreamFormat,
+        consumers: Vec<RouteConsumer>,
+        mix_gain: f32,
+    ) -> Result<Self, WavOutputError>
+    where
+        W: Write + Seek + Send + 'static,
+    {
+        Self::try_spawn_mix(writer, format, consumers, mix_gain).map_err(|(err, _consumers)| err)
+    }
+
     pub fn spawn<W>(
         writer: W,
         format: StreamFormat,
@@ -216,6 +232,15 @@ impl WavFileOutput {
         consumer: RouteConsumer,
     ) -> Result<Self, WavOutputError> {
         Self::spawn(BufWriter::new(file), format, consumer)
+    }
+
+    pub fn try_spawn_file_mix(
+        file: File,
+        format: StreamFormat,
+        consumers: Vec<RouteConsumer>,
+        mix_gain: f32,
+    ) -> Result<Self, (WavOutputError, Vec<RouteConsumer>)> {
+        Self::try_spawn_mix(BufWriter::new(file), format, consumers, mix_gain)
     }
 
     pub fn spawn_file_mix(

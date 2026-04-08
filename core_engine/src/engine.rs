@@ -238,6 +238,18 @@ impl AudioEngineController {
         ))
     }
 
+    pub fn remove_stream(&mut self, stream: &StreamId) -> Result<(), EngineError> {
+        if !self.stream_routers.contains_key(stream) {
+            return Err(EngineError::StreamNotFound(stream.clone()));
+        }
+
+        self.stream_routers.remove(stream);
+        self.pipeline_stats.remove(stream);
+        self.processor_stats.remove(stream);
+        self.stream_sources.remove(stream);
+        Ok(())
+    }
+
     pub fn route(&mut self, stream: &StreamId, output: &OutputId) -> Result<(), EngineError> {
         if self.output_consumers.contains_key(output) {
             return Err(EngineError::RouteAlreadyExists(output.clone()));

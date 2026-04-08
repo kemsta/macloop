@@ -322,23 +322,37 @@ impl AsrSink {
         Ok(())
     }
 
-    pub fn spawn(
+    pub fn try_spawn(
         inputs: Vec<AsrSinkInput>,
         config: AsrSinkConfig,
         mut callback: Box<dyn AsrSinkCallback>,
-    ) -> Result<Self, AsrSinkError> {
+    ) -> Result<Self, (AsrSinkError, Vec<AsrSinkInput>)> {
         if inputs.is_empty() {
-            return Err(AsrSinkError::NoInputs);
+            return Err((AsrSinkError::NoInputs, inputs));
         }
 
-        Self::validate_config(config)?;
+        if let Err(err) = Self::validate_config(config) {
+            return Err((err, inputs));
+        }
 
         let mut states = Vec::with_capacity(inputs.len());
         let mut input_metrics = HashMap::with_capacity(inputs.len());
         for input in inputs {
             let metrics = Arc::new(AsrInputMetrics::default());
             input_metrics.insert(input.input_id.clone(), metrics.clone());
-            states.push(InputState::new(input, config, metrics)?);
+            match InputState::new(input, config, metrics) {
+                Ok(state) => states.push(state),
+                Err(err) => {
+                    let inputs = states
+                        .into_iter()
+                        .map(|state| AsrSinkInput {
+                            input_id: state.input_id,
+                            consumer: state.consumer,
+                        })
+                        .collect();
+                    return Err((err, inputs));
+                }
+            }
         }
         let metrics = Arc::new(AsrSinkMetrics {
             inputs: input_metrics,
@@ -376,6 +390,14 @@ impl AsrSink {
             handle: Some(handle),
             metrics,
         })
+    }
+
+    pub fn spawn(
+        inputs: Vec<AsrSinkInput>,
+        config: AsrSinkConfig,
+        callback: Box<dyn AsrSinkCallback>,
+    ) -> Result<Self, AsrSinkError> {
+        Self::try_spawn(inputs, config, callback).map_err(|(err, _inputs)| err)
     }
 
     pub fn stats(&self) -> AsrSinkMetricsSnapshot {
