@@ -361,6 +361,54 @@ mod tests {
     }
 
     #[test]
+    fn select_display_with_explicit_id() {
+        let displays = [TestDisplay { id: 10 }, TestDisplay { id: 20 }];
+        let selected = select_display(&displays, Some(20), |display| display.id).expect("display");
+        assert_eq!(selected.id, 20);
+    }
+
+    #[test]
+    fn select_display_reports_missing_display() {
+        let displays = [TestDisplay { id: 10 }];
+        let err = select_display(&displays, Some(99), |display| display.id).expect_err("missing");
+        match err {
+            AppAudioError::DisplayNotFound(id) => assert_eq!(id, 99),
+            other => panic!("expected DisplayNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_display_on_empty_displays() {
+        let err = select_display::<TestDisplay>(&[], None, |display| display.id)
+            .expect_err("no displays");
+        match err {
+            AppAudioError::NoDisplaysAvailable => {}
+            other => panic!("expected NoDisplaysAvailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_applications_on_empty_apps() {
+        let err =
+            select_applications::<TestApplication>(&[], &[10], |app| app.pid).expect_err("no apps");
+        match err {
+            AppAudioError::NoApplicationsAvailable => {}
+            other => panic!("expected NoApplicationsAvailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_display_covers_all_variants() {
+        assert!(!format!("{}", AppAudioError::UnsupportedPlatform).is_empty());
+        assert!(!format!("{}", AppAudioError::NoApplicationsAvailable).is_empty());
+        assert!(!format!("{}", AppAudioError::NoApplicationsSelected).is_empty());
+        assert!(!format!("{}", AppAudioError::ApplicationsNotFound(vec![1, 2])).is_empty());
+        assert!(!format!("{}", AppAudioError::NoDisplaysAvailable).is_empty());
+        assert!(!format!("{}", AppAudioError::DisplayNotFound(42)).is_empty());
+        assert!(!format!("{}", AppAudioError::Driver("test".into())).is_empty());
+    }
+
+    #[test]
     fn select_applications_preserves_requested_order() {
         let apps = [
             TestApplication { pid: 10 },

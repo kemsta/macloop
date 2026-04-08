@@ -317,6 +317,51 @@ mod tests {
     use crate::format::{SampleFormat, MASTER_FORMAT};
 
     #[test]
+    fn convert_channels_rejects_invalid_input_len() {
+        let mut out = Vec::new();
+        let err = MasterFormatConverter::convert_channels(&[0.1, 0.2, 0.3], 2, 1, &mut out)
+            .expect_err("invalid input length");
+
+        assert!(matches!(
+            err,
+            InputConversionError::InvalidInputLen {
+                input_len: 3,
+                channels: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn convert_channels_rejects_unsupported_channel_conversion() {
+        let mut out = Vec::new();
+        let err = MasterFormatConverter::convert_channels(
+            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            3,
+            2,
+            &mut out,
+        )
+        .expect_err("unsupported conversion");
+
+        assert!(matches!(
+            err,
+            InputConversionError::UnsupportedChannelConversion {
+                input_channels: 3,
+                output_channels: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn converter_reports_input_and_output_formats() {
+        let input = StreamFormat::new(48_000, 1);
+        let output = StreamFormat::new(48_000, 2);
+        let converter = MasterFormatConverter::new(input, output).expect("converter");
+
+        assert_eq!(converter.input_format(), input);
+        assert_eq!(converter.output_format(), output);
+    }
+
+    #[test]
     fn mono_to_stereo_without_resample() {
         let mut converter = MasterFormatConverter::new(StreamFormat::new(48_000, 1), MASTER_FORMAT)
             .expect("converter");

@@ -338,6 +338,42 @@ mod tests {
     }
 
     #[test]
+    fn try_spawn_mix_rejects_empty_consumers() {
+        let err = match WavFileOutput::try_spawn_mix(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            MASTER_FORMAT,
+            vec![],
+            1.0,
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected empty consumers error"),
+        };
+
+        assert!(matches!(err.0, WavOutputError::Io(_)));
+        assert!(err.1.is_empty());
+    }
+
+    #[test]
+    fn wav_spec_rejects_i16_output() {
+        let err = WavFileOutput::wav_spec(StreamFormat::with_sample_format(
+            48_000,
+            2,
+            SampleFormat::I16,
+        ))
+        .expect_err("i16 unsupported");
+
+        assert!(matches!(
+            err,
+            WavOutputError::UnsupportedSampleFormat(SampleFormat::I16)
+        ));
+    }
+
+    #[test]
+    fn duration_to_u32_us_saturates() {
+        assert_eq!(duration_to_u32_us(Duration::MAX), u32::MAX);
+    }
+
+    #[test]
     fn writes_wav_from_routed_stream_to_file() {
         let path = test_wav_path();
 
@@ -474,6 +510,23 @@ mod tests {
         assert_eq!(samples, vec![2.0; 8]);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stop_twice_returns_already_stopped() {
+        let ring = HeapRb::<f32>::new(32);
+        let (_producer, consumer) = ring.split();
+        let mut wav = WavFileOutput::spawn_mix(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            MASTER_FORMAT,
+            vec![consumer],
+            1.0,
+        )
+        .expect("spawn wav");
+
+        wav.stop().expect("first stop");
+        let err = wav.stop().expect_err("second stop should fail");
+        assert!(matches!(err, WavOutputError::AlreadyStopped));
     }
 
     #[test]
