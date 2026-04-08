@@ -387,4 +387,36 @@ mod tests {
             other => panic!("expected InvalidConfig, got {other:?}"),
         }
     }
+
+    #[test]
+    fn explicit_device_with_vpio_disabled_is_valid() {
+        validate_microphone_config(MicrophoneSourceConfig {
+            device_id: Some(42),
+            vpio_enabled: false,
+        })
+        .expect("should be valid");
+    }
+
+    #[test]
+    fn default_device_with_vpio_disabled_is_valid() {
+        validate_microphone_config(MicrophoneSourceConfig {
+            device_id: None,
+            vpio_enabled: false,
+        })
+        .expect("should be valid");
+    }
+
+    #[test]
+    fn error_display_covers_all_variants() {
+        use crate::converter::InputConversionError;
+
+        assert!(!format!("{}", MicrophoneError::UnsupportedPlatform).is_empty());
+        assert!(!format!("{}", MicrophoneError::InvalidConfig("test".into())).is_empty());
+        assert!(!format!(
+            "{}",
+            MicrophoneError::Converter(InputConversionError::ResamplerInit("test".into()))
+        )
+        .is_empty());
+        assert!(!format!("{}", MicrophoneError::Driver("test".into())).is_empty());
+    }
 }

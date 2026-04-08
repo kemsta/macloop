@@ -340,6 +340,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_empty_buffers_produces_empty_scratch() {
+        let mut scratch = Vec::new();
+        normalize_audio_buffers_into_scratch(&[], 2, &mut scratch);
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn normalize_zero_target_channels_produces_empty_scratch() {
+        let mut scratch = Vec::new();
+        normalize_audio_buffers_into_scratch(
+            &[AudioBufferRef {
+                samples: &[1.0, 2.0],
+                channels: 1,
+            }],
+            0,
+            &mut scratch,
+        );
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn select_items_by_ids_on_empty_items_returns_no_items_error() {
+        let err = select_items_by_ids::<Item, String>(
+            &[],
+            &[10],
+            |item| item.id,
+            || "no selection".to_string(),
+            || "no items".to_string(),
+            |ids| format!("missing {ids:?}"),
+        )
+        .expect_err("empty items");
+
+        assert_eq!(err, "no items");
+    }
+
+    #[test]
     fn normalize_uses_shortest_buffer_length() {
         let mut scratch = Vec::new();
         normalize_audio_buffers_into_scratch(

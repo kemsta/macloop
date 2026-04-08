@@ -292,6 +292,21 @@ mod tests {
     }
 
     #[test]
+    fn select_display_with_explicit_id() {
+        let displays = [TestDisplay { id: 10 }, TestDisplay { id: 20 }];
+        let selected = select_display(&displays, Some(20), |display| display.id).expect("display");
+        assert_eq!(selected.id, 20);
+    }
+
+    #[test]
+    fn error_display_covers_all_variants() {
+        assert!(!format!("{}", SystemAudioError::UnsupportedPlatform).is_empty());
+        assert!(!format!("{}", SystemAudioError::NoDisplaysAvailable).is_empty());
+        assert!(!format!("{}", SystemAudioError::DisplayNotFound(42)).is_empty());
+        assert!(!format!("{}", SystemAudioError::Driver("test".into())).is_empty());
+    }
+
+    #[test]
     fn select_display_reports_missing_display() {
         let displays = [TestDisplay { id: 10 }];
         let err = select_display(&displays, Some(20), |display| display.id).expect_err("missing");
