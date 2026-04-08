@@ -198,6 +198,35 @@ mod tests {
     }
 
     #[test]
+    fn select_item_by_id_on_empty_items_returns_no_items() {
+        let err = select_item_by_id::<Item, String>(
+            &[],
+            None,
+            |item| item.id,
+            || "no items".to_string(),
+            |id| format!("missing {id}"),
+        )
+        .expect_err("empty items");
+
+        assert_eq!(err, "no items");
+    }
+
+    #[test]
+    fn select_item_by_id_with_explicit_id_returns_item() {
+        let items = [Item { id: 10 }, Item { id: 20 }];
+        let selected = select_item_by_id(
+            &items,
+            Some(20),
+            |item| item.id,
+            || "no items".to_string(),
+            |id| format!("missing {id}"),
+        )
+        .expect("select explicit item");
+
+        assert_eq!(selected.id, 20);
+    }
+
+    #[test]
     fn select_item_by_id_reports_missing_item() {
         let items = [Item { id: 10 }, Item { id: 20 }];
         let err = select_item_by_id(
@@ -245,6 +274,40 @@ mod tests {
         .expect_err("empty selection");
 
         assert_eq!(err, "no selection");
+    }
+
+    #[test]
+    fn select_items_by_ids_empty_selection_takes_priority_over_no_items() {
+        let err = select_items_by_ids::<Item, String>(
+            &[],
+            &[],
+            |item| item.id,
+            || "no selection".to_string(),
+            || "no items".to_string(),
+            |ids| format!("missing {ids:?}"),
+        )
+        .expect_err("empty selection should win");
+
+        assert_eq!(err, "no selection");
+    }
+
+    #[test]
+    fn select_items_by_ids_preserves_duplicate_ids() {
+        let items = [Item { id: 10 }, Item { id: 20 }];
+        let selected = select_items_by_ids(
+            &items,
+            &[10, 10, 20],
+            |item| item.id,
+            || "no selection".to_string(),
+            || "no items".to_string(),
+            |ids| format!("missing {ids:?}"),
+        )
+        .expect("duplicate ids");
+
+        assert_eq!(
+            selected.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![10, 10, 20]
+        );
     }
 
     #[test]
@@ -337,6 +400,42 @@ mod tests {
         );
 
         assert_eq!(scratch, vec![1.0, 10.0, 2.0, 20.0]);
+    }
+
+    #[test]
+    fn normalize_single_buffer_truncates_extra_channels() {
+        let mut scratch = Vec::new();
+        normalize_audio_buffers_into_scratch(
+            &[AudioBufferRef {
+                samples: &[1.0, 10.0, 100.0, 2.0, 20.0, 200.0],
+                channels: 3,
+            }],
+            2,
+            &mut scratch,
+        );
+
+        assert_eq!(scratch, vec![1.0, 10.0, 2.0, 20.0]);
+    }
+
+    #[test]
+    fn normalize_multi_buffer_fills_missing_target_channels_from_fallback() {
+        let mut scratch = Vec::new();
+        normalize_audio_buffers_into_scratch(
+            &[
+                AudioBufferRef {
+                    samples: &[1.0, 2.0],
+                    channels: 1,
+                },
+                AudioBufferRef {
+                    samples: &[10.0, 20.0],
+                    channels: 1,
+                },
+            ],
+            3,
+            &mut scratch,
+        );
+
+        assert_eq!(scratch, vec![1.0, 10.0, 1.0, 2.0, 20.0, 2.0]);
     }
 
     #[test]
