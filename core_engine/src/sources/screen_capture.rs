@@ -227,6 +227,20 @@ mod tests {
     }
 
     #[test]
+    fn select_item_by_id_on_empty_items_with_explicit_id_returns_not_found() {
+        let err = select_item_by_id::<Item, String>(
+            &[],
+            Some(30),
+            |item| item.id,
+            || "no items".to_string(),
+            |id| format!("missing {id}"),
+        )
+        .expect_err("missing item");
+
+        assert_eq!(err, "missing 30");
+    }
+
+    #[test]
     fn select_item_by_id_reports_missing_item() {
         let items = [Item { id: 10 }, Item { id: 20 }];
         let err = select_item_by_id(
@@ -460,6 +474,21 @@ mod tests {
     }
 
     #[test]
+    fn normalize_single_interleaved_buffer_does_not_pad_extra_target_channels() {
+        let mut scratch = Vec::new();
+        normalize_audio_buffers_into_scratch(
+            &[AudioBufferRef {
+                samples: &[1.0, 10.0, 2.0, 20.0],
+                channels: 2,
+            }],
+            4,
+            &mut scratch,
+        );
+
+        assert_eq!(scratch, vec![1.0, 10.0, 2.0, 20.0]);
+    }
+
+    #[test]
     fn normalize_zero_target_channels_produces_empty_scratch() {
         let mut scratch = vec![99.0, 100.0];
         normalize_audio_buffers_into_scratch(
@@ -470,6 +499,27 @@ mod tests {
             0,
             &mut scratch,
         );
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn normalize_multi_buffer_with_no_complete_frames_clears_existing_scratch() {
+        let mut scratch = vec![99.0];
+        normalize_audio_buffers_into_scratch(
+            &[
+                AudioBufferRef {
+                    samples: &[],
+                    channels: 1,
+                },
+                AudioBufferRef {
+                    samples: &[10.0, 20.0],
+                    channels: 1,
+                },
+            ],
+            2,
+            &mut scratch,
+        );
+
         assert!(scratch.is_empty());
     }
 

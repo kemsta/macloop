@@ -257,6 +257,80 @@ mod tests {
     }
 
     #[test]
+    fn stop_before_start_delay_emits_no_samples() {
+        let mut engine = AudioEngineController::new(32, 32, 4096);
+        let stream = "synthetic".to_string();
+        let route = "route".to_string();
+
+        let pipeline = engine
+            .create_stream(stream.clone(), SourceType::Synthetic, 8, 4)
+            .expect("create stream");
+        engine.route(&stream, &route).expect("route");
+
+        let consumer = &mut engine
+            .take_output_consumer(&route)
+            .expect("output consumer present");
+        let mut source = SyntheticSource::new(
+            pipeline,
+            SyntheticSourceConfig {
+                frames_per_callback: 4,
+                callback_count: 4,
+                start_delay: Duration::from_millis(30),
+                ..Default::default()
+            },
+        )
+        .expect("create synthetic source");
+
+        source.start().expect("start synthetic source");
+        source.stop().expect("stop synthetic source");
+
+        assert!(consumer.try_pop().is_none());
+    }
+
+    #[test]
+    fn zero_step_value_emits_constant_samples() {
+        let mut engine = AudioEngineController::new(32, 32, 4096);
+        let stream = "synthetic".to_string();
+        let route = "route".to_string();
+
+        let pipeline = engine
+            .create_stream(stream.clone(), SourceType::Synthetic, 8, 4)
+            .expect("create stream");
+        engine.route(&stream, &route).expect("route");
+
+        let consumer = &mut engine
+            .take_output_consumer(&route)
+            .expect("output consumer present");
+        let mut source = SyntheticSource::new(
+            pipeline,
+            SyntheticSourceConfig {
+                frames_per_callback: 2,
+                callback_count: 2,
+                start_value: 3.5,
+                step_value: 0.0,
+                ..Default::default()
+            },
+        )
+        .expect("create synthetic source");
+
+        source.start().expect("start synthetic source");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut collected = Vec::new();
+        while Instant::now() < deadline && collected.len() < 8 {
+            if let Some(sample) = consumer.try_pop() {
+                collected.push(sample);
+            } else {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        source.stop().expect("stop synthetic source");
+
+        assert_eq!(collected, vec![3.5; 8]);
+    }
+
+    #[test]
     fn emits_predictable_stereo_values() {
         let mut engine = AudioEngineController::new(32, 32, 4096);
         let stream = "synthetic".to_string();

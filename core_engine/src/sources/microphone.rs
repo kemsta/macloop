@@ -407,6 +407,24 @@ mod tests {
     }
 
     #[test]
+    fn default_vpio_config_is_valid() {
+        validate_microphone_config(MicrophoneSourceConfig::default()).expect("default valid");
+    }
+
+    #[test]
+    fn input_conversion_error_maps_to_converter_variant() {
+        use crate::converter::InputConversionError;
+
+        let err: MicrophoneError = InputConversionError::ResamplerInit("boom".into()).into();
+        match err {
+            MicrophoneError::Converter(InputConversionError::ResamplerInit(message)) => {
+                assert_eq!(message, "boom");
+            }
+            other => panic!("expected Converter(ResamplerInit), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn error_display_covers_all_variants() {
         use crate::converter::InputConversionError;
 

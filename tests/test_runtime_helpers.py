@@ -3,8 +3,47 @@ from __future__ import annotations
 import asyncio
 import gc
 import os
+import queue
 
+import numpy as np
 import pytest
+
+
+async def _drain_async_queue(q: "asyncio.Queue[object]") -> list[object]:
+    items = []
+    while not q.empty():
+        items.append(await q.get())
+    return items
+
+
+def test_generate_id_and_unexpected_kwargs_helpers(macloop_module) -> None:
+    first = macloop_module._generate_id("sink")
+    second = macloop_module._generate_id("sink")
+    assert first.startswith("sink_")
+    assert second.startswith("sink_")
+    assert first != second
+
+    macloop_module._raise_on_unexpected_kwargs("Thing", {})
+    with pytest.raises(TypeError, match=r"Thing got unexpected keyword arguments: a, z"):
+        macloop_module._raise_on_unexpected_kwargs("Thing", {"z": 1, "a": 2})
+
+
+def test_drop_oldest_put_helpers(macloop_module) -> None:
+    q: "queue.Queue[object]" = queue.Queue(maxsize=2)
+    macloop_module._drop_oldest_put(q, "first")
+    macloop_module._drop_oldest_put(q, "second")
+    macloop_module._drop_oldest_put(q, "third")
+    assert q.get_nowait() == "second"
+    assert q.get_nowait() == "third"
+
+    async def exercise_async() -> list[object]:
+        q_async: "asyncio.Queue[object]" = asyncio.Queue(maxsize=2)
+        macloop_module._drop_oldest_put_async(q_async, "first")
+        macloop_module._drop_oldest_put_async(q_async, "second")
+        macloop_module._drop_oldest_put_async(q_async, "third")
+        return await _drain_async_queue(q_async)
+
+    assert asyncio.run(exercise_async()) == ["second", "third"]
 
 
 def test_microphone_source_list_devices_passthrough(macloop_module) -> None:
@@ -95,6 +134,13 @@ def test_audio_engine_rejects_cross_engine_handles(macloop_module) -> None:
             )
 
 
+def test_audio_engine_close_is_idempotent(macloop_module) -> None:
+    engine = macloop_module.AudioEngine()
+    engine.close()
+    engine.close()
+    assert engine._backend.closed is True
+
+
 def test_audio_engine_close_swallows_sink_errors(macloop_module) -> None:
     class FailingSink:
         def close(self) -> None:
@@ -107,6 +153,69 @@ def test_audio_engine_close_swallows_sink_errors(macloop_module) -> None:
     assert engine._backend.closed is True
     with pytest.raises(RuntimeError, match="audio engine is closed"):
         engine.stats()
+
+
+def test_asr_sink_close_releases_routes_on_backend_error(macloop_module) -> None:
+    with macloop_module.AudioEngine() as engine:
+        stream = engine.create_stream(macloop_module.MicrophoneSource)
+        route = engine.route(stream=stream)
+        sink = macloop_module.AsrSink(
+            routes=[route],
+            chunk_frames=2,
+            sample_rate=16000,
+            channels=1,
+            sample_format="f32",
+        )
+        sink._backend.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            sink.close()
+
+        assert route.id not in engine._claimed_routes
+        assert sink._closed is True
+
+
+def test_wav_sink_close_releases_routes_on_backend_error(macloop_module, tmp_path) -> None:
+    path = tmp_path / "boom.wav"
+    with macloop_module.AudioEngine() as engine:
+        stream = engine.create_stream(macloop_module.MicrophoneSource)
+        route = engine.route(stream=stream)
+        sink = macloop_module.WavSink(route=route, file=path)
+        sink._backend.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            sink.close()
+
+        assert route.id not in engine._claimed_routes
+        assert sink._closed is True
+
+
+def test_asr_sink_rejects_different_asyncio_event_loop(macloop_module) -> None:
+    async def activate_async_mode(sink) -> None:
+        sink._activate_async_mode()
+
+    loop_a = asyncio.new_event_loop()
+    loop_b = asyncio.new_event_loop()
+    try:
+        with macloop_module.AudioEngine() as engine:
+            stream = engine.create_stream(macloop_module.MicrophoneSource)
+            route = engine.route(stream=stream)
+            sink = macloop_module.AsrSink(
+                routes=[route],
+                chunk_frames=2,
+                sample_rate=16000,
+                channels=1,
+                sample_format="f32",
+            )
+            try:
+                loop_a.run_until_complete(activate_async_mode(sink))
+                with pytest.raises(RuntimeError, match="bound to a different event loop"):
+                    loop_b.run_until_complete(activate_async_mode(sink))
+            finally:
+                sink.close()
+    finally:
+        loop_a.close()
+        loop_b.close()
 
 
 def test_asr_sink_rejects_mixed_sync_async_consumption(macloop_module) -> None:

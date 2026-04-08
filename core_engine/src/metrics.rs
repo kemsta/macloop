@@ -274,6 +274,46 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn percentile_from_empty_histogram_returns_zero() {
+        assert_eq!(percentile_from_histogram(&[], &[], 0, 0.5), 0);
+        assert_eq!(percentile_from_histogram(&[1, 2], &[0, 0], 0, 0.9), 0);
+    }
+
+    #[test]
+    fn bucket_index_clamps_large_values_to_last_bucket() {
+        assert_eq!(bucket_index(u32::MAX), LATENCY_BUCKET_BOUNDS_US.len() - 1);
+    }
+
+    #[test]
+    fn node_metrics_snapshot_reflects_processing_time_and_latency() {
+        let metrics = NodeMetrics::default();
+        metrics.processing_time_us.store(123, Ordering::Relaxed);
+        metrics.latency.record(64);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.processing_time_us, 123);
+        assert_eq!(snapshot.max_processing_time_us, 64);
+        assert_eq!(snapshot.latency.max_us, 64);
+        assert_eq!(snapshot.latency.count, 1);
+    }
+
+    #[test]
+    fn pipeline_metrics_snapshot_reflects_all_fields() {
+        let metrics = PipelineMetrics::default();
+        metrics.total_callback_time_us.store(321, Ordering::Relaxed);
+        metrics.dropped_frames.store(7, Ordering::Relaxed);
+        metrics.buffer_size.store(256, Ordering::Relaxed);
+        metrics.latency.record(128);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.total_callback_time_us, 321);
+        assert_eq!(snapshot.dropped_frames, 7);
+        assert_eq!(snapshot.buffer_size, 256);
+        assert_eq!(snapshot.latency.max_us, 128);
+        assert_eq!(snapshot.latency.count, 1);
+    }
+
+    #[test]
     fn histogram_places_values_into_log_buckets() {
         let histogram = LatencyHistogram::default();
         histogram.record(1);

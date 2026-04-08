@@ -435,6 +435,50 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn validate_config_rejects_zero_chunk_frames() {
+        let err = AsrSink::validate_config(AsrSinkConfig {
+            format: StreamFormat::new(48_000, 1),
+            chunk_frames: 0,
+        })
+        .expect_err("invalid chunk frames");
+
+        assert!(matches!(err, AsrSinkError::InvalidChunkFrames));
+    }
+
+    #[test]
+    fn validate_config_rejects_unsupported_channels() {
+        let err = AsrSink::validate_config(AsrSinkConfig {
+            format: StreamFormat::new(48_000, 3),
+            chunk_frames: 4,
+        })
+        .expect_err("unsupported channels");
+
+        assert!(matches!(err, AsrSinkError::UnsupportedOutputChannels(3)));
+    }
+
+    #[test]
+    fn spawn_rejects_no_inputs() {
+        let err = match AsrSink::spawn(
+            vec![],
+            AsrSinkConfig {
+                format: StreamFormat::new(48_000, 1),
+                chunk_frames: 4,
+            },
+            Box::new(|_chunk: AsrChunkView<'_>| {}),
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected no inputs error"),
+        };
+
+        assert!(matches!(err, AsrSinkError::NoInputs));
+    }
+
+    #[test]
+    fn duration_to_u32_us_saturates() {
+        assert_eq!(duration_to_u32_us(Duration::MAX), u32::MAX);
+    }
+
+    #[test]
     fn emits_f32_chunks_from_stereo_input() {
         let mut engine = AudioEngineController::new(32, 32, 4096);
         let stream = "capture".to_string();
@@ -566,6 +610,39 @@ mod tests {
         assert_eq!(seen[1].1, vec![-8192, -8192, -8192, -8192]);
 
         sink.stop().expect("stop sink");
+    }
+
+    #[test]
+    fn stop_twice_returns_already_stopped() {
+        let mut engine = AudioEngineController::new(32, 32, 4096);
+        let stream = "capture".to_string();
+        let output = "asr_capture".to_string();
+
+        let _pipeline = engine
+            .create_stream(stream.clone(), SourceType::SystemAudio, 8, 4)
+            .expect("create stream");
+        engine.route(&stream, &output).expect("route");
+
+        let consumer = engine
+            .take_output_consumer(&output)
+            .expect("output consumer present");
+
+        let mut sink = AsrSink::spawn(
+            vec![AsrSinkInput {
+                input_id: output,
+                consumer,
+            }],
+            AsrSinkConfig {
+                format: StreamFormat::new(48_000, 1),
+                chunk_frames: 4,
+            },
+            Box::new(|_chunk: AsrChunkView<'_>| {}),
+        )
+        .expect("spawn sink");
+
+        sink.stop().expect("first stop");
+        let err = sink.stop().expect_err("second stop should fail");
+        assert!(matches!(err, AsrSinkError::AlreadyStopped));
     }
 
     #[test]
