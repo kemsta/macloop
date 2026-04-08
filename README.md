@@ -6,15 +6,30 @@
 [![codecov](https://codecov.io/gh/kemsta/macloop/branch/main/graph/badge.svg)](https://codecov.io/gh/kemsta/macloop)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> 🎙️ Build programmable macOS audio pipelines in Python without routing your whole machine through a virtual driver.
+> 🎙️ Build programmable macOS app audio capture and speech-to-text pipelines in Python without routing your whole machine through a virtual driver.
 
-`macloop` is a Python-first audio capture toolkit backed by a real-time Rust engine. It lets you capture microphones, system audio, or individual applications, route one stream into multiple consumers, apply processors, and feed the results into sinks such as ASR and WAV recording, all from one in-process API.
+`macloop` is a Python-first macOS audio capture toolkit backed by a real-time Rust engine. It lets you capture microphones, system audio, or individual applications, route one stream into multiple consumers, apply processors, and feed the results into sinks such as ASR (speech-to-text), transcription, and WAV recording from one in-process API.
+
+If you are looking for a **BlackHole alternative for programmable Python workflows**, `macloop` focuses on in-process app audio capture and recording/transcription pipelines instead of system-wide virtual-device routing.
+
+### Why it is easy to adopt
+
+- Supports **Python 3.9+**
+- Install with a standard command: `pip install macloop`
+- No extra user-facing setup beyond normal installation and macOS permissions
 
 ---
 
 ## ✨ Why `macloop`?
 
-Virtual devices such as BlackHole are useful when you need a system-wide loopback device. `macloop` targets a different workflow: **programmable capture pipelines inside an application**.
+Virtual devices such as BlackHole are useful when you need a system-wide virtual audio device. `macloop` targets a different workflow: **programmable capture pipelines inside an application**.
+
+Typical use cases:
+
+- Capture audio from a single macOS application such as Zoom
+- Stream audio into ASR or speech-to-text systems in Python
+- Record and transcribe meetings from one pipeline
+- Replace manual BlackHole-style routing with an in-process Python API
 
 ### `macloop` vs virtual-driver workflows
 
@@ -101,6 +116,8 @@ pip install macloop
 
 - macOS
 - Python 3.9+
+
+That is the full user-facing requirement for installation: create a normal Python environment and run `pip install macloop`.
 
 ---
 

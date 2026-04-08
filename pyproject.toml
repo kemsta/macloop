@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "macloop"
 dynamic = ["version"]
-description = "Low-latency macOS audio capture powered by Rust"
+description = "Python toolkit for macOS app audio capture and ASR/transcription pipelines"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -15,10 +15,29 @@ classifiers = [
     "Programming Language :: Rust",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
+    "Operating System :: MacOS :: MacOS X",
     "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Typing :: Typed",
 ]
-keywords = ["audio", "macos", "microphone", "rust", "numpy"]
+keywords = [
+    "audio",
+    "macos",
+    "python",
+    "microphone",
+    "system-audio",
+    "app-audio",
+    "zoom",
+    "blackhole-alternative",
+    "asr",
+    "speech-to-text",
+    "transcription",
+    "recording",
+    "rust",
+    "numpy",
+]
 dependencies = [
     "numpy>=1.21.6",
 ]
