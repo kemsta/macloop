@@ -38,9 +38,9 @@ jobs:
 
       - name: Run tests
         run: |
-          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop
-          uv run maturin develop --manifest-path python_ffi/Cargo.toml
-          uv run pytest -q tests
+          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop --no-install-local
+          .venv/bin/maturin develop --manifest-path python_ffi/Cargo.toml
+          .venv/bin/pytest -q tests
 
       - name: Install Rust coverage tooling
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
@@ -51,9 +51,9 @@ jobs:
       - name: Generate Python coverage report
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         run: |
-          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop
-          uv run maturin develop --manifest-path python_ffi/Cargo.toml
-          uv run pytest \
+          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop --no-install-local
+          .venv/bin/maturin develop --manifest-path python_ffi/Cargo.toml
+          .venv/bin/pytest \
             --cov=macloop \
             --cov-report=xml:python-coverage.xml \
             --cov-report=term-missing \
@@ -69,8 +69,8 @@ jobs:
           export CARGO_TARGET_DIR="${CARGO_LLVM_COV_TARGET_DIR:-target/llvm-cov-target}"
           export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
           cargo llvm-cov --workspace --no-report
-          uv run maturin develop --manifest-path python_ffi/Cargo.toml
-          uv run pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
+          .venv/bin/maturin develop --manifest-path python_ffi/Cargo.toml
+          .venv/bin/pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
           cargo llvm-cov report --lcov --output-path rust-lcov.info
 
       - name: Upload coverage to Codecov
