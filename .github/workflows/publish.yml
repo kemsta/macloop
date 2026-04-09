@@ -38,7 +38,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv sync --group dev --no-install-project
+          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop
           uv run maturin develop --manifest-path python_ffi/Cargo.toml
           uv run pytest -q tests
 
@@ -51,6 +51,7 @@ jobs:
       - name: Generate Python coverage report
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         run: |
+          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop
           uv run maturin develop --manifest-path python_ffi/Cargo.toml
           uv run pytest \
             --cov=macloop \
