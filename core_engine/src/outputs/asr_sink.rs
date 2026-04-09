@@ -4,7 +4,7 @@ use crate::converter::{
 use crate::engine::RouteConsumer;
 use crate::format::{SampleFormat, StreamFormat, MASTER_FORMAT};
 use crate::metrics::LatencyHistogram;
-use ringbuf::traits::Consumer;
+use ringbuf::traits::{Consumer, Observer};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -178,24 +178,50 @@ impl InputState {
     }
 
     fn poll(&mut self, callback: &mut dyn AsrSinkCallback) -> Result<bool, AsrSinkError> {
+        self.poll_with_limit(callback, None)
+    }
+
+    fn poll_stop(&mut self, callback: &mut dyn AsrSinkCallback) -> Result<bool, AsrSinkError> {
+        let channels = MASTER_FORMAT.channels.max(1) as usize;
+        let bounded_samples = self.consumer.occupied_len() / channels * channels;
+        self.poll_with_limit(callback, Some(bounded_samples))
+    }
+
+    fn poll_with_limit(
+        &mut self,
+        callback: &mut dyn AsrSinkCallback,
+        max_samples: Option<usize>,
+    ) -> Result<bool, AsrSinkError> {
         let poll_start = Instant::now();
         let mut callback_time_us = 0_u32;
         let mut progressed = false;
+        let mut drained = 0_usize;
 
-        while let Some(sample) = self.consumer.try_pop() {
+        while max_samples.map(|limit| drained < limit).unwrap_or(true) {
+            let Some(sample) = self.consumer.try_pop() else {
+                break;
+            };
             self.drained_master.push(sample);
             progressed = true;
+            drained += 1;
         }
 
-        if !self.drained_master.is_empty() {
+        let input_channels = MASTER_FORMAT.channels.max(1) as usize;
+        let ready_input_samples = self.drained_master.len() / input_channels * input_channels;
+        if ready_input_samples > 0 {
             self.converter
-                .convert(&self.drained_master, &mut self.converted_output)?;
+                .convert(&self.drained_master[..ready_input_samples], &mut self.converted_output)?;
             if !self.converted_output.is_empty() {
                 self.pending_output
                     .extend_from_slice(&self.converted_output);
                 progressed = true;
             }
-            self.drained_master.clear();
+
+            if ready_input_samples == self.drained_master.len() {
+                self.drained_master.clear();
+            } else {
+                self.drained_master.drain(..ready_input_samples);
+            }
         }
 
         let chunk_samples = self.chunk_frames * self.target_format.channels as usize;
@@ -365,16 +391,16 @@ impl AsrSink {
             let idle_sleep = Duration::from_micros(200);
 
             loop {
+                if stop_thread.load(Ordering::Relaxed) {
+                    for state in &mut states {
+                        let _ = state.poll_stop(&mut *callback)?;
+                    }
+                    break;
+                }
+
                 let mut progressed = false;
                 for state in &mut states {
                     progressed |= state.poll(&mut *callback)?;
-                }
-
-                if stop_thread.load(Ordering::Relaxed) {
-                    if !progressed {
-                        break;
-                    }
-                    continue;
                 }
 
                 if !progressed {
@@ -432,7 +458,12 @@ mod tests {
     use super::*;
     use crate::engine::{AudioEngineController, SourceType};
     use crossbeam_channel::unbounded;
-    use std::time::Duration;
+    use ringbuf::traits::{Producer, Split};
+    use ringbuf::HeapRb;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn validate_config_rejects_zero_chunk_frames() {
@@ -694,5 +725,60 @@ mod tests {
         assert!(input_metrics.callback.count >= 1);
 
         sink.stop().expect("stop sink");
+    }
+
+    #[test]
+    fn stop_does_not_keep_emitting_future_live_chunks() {
+        let ring = HeapRb::<f32>::new(4096);
+        let (mut producer, consumer) = ring.split();
+        let chunk_count = Arc::new(AtomicUsize::new(0));
+        let chunk_count_callback = chunk_count.clone();
+
+        let sink = AsrSink::spawn(
+            vec![AsrSinkInput {
+                input_id: "live".to_string(),
+                consumer,
+            }],
+            AsrSinkConfig {
+                format: StreamFormat::new(48_000, 1),
+                chunk_frames: 4,
+            },
+            Box::new(move |_chunk: AsrChunkView<'_>| {
+                chunk_count_callback.fetch_add(1, AtomicOrdering::Relaxed);
+            }),
+        )
+        .expect("spawn sink");
+
+        let stop_producers = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop_producers.clone();
+        let producer_thread = thread::spawn(move || {
+            let batch = [1.0_f32; 8];
+            while !stop_flag.load(AtomicOrdering::Relaxed) {
+                let _ = producer.push_slice(&batch);
+                thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        thread::sleep(Duration::from_millis(25));
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut sink = sink;
+            let started = Instant::now();
+            let result = sink.stop();
+            done_tx
+                .send((started.elapsed(), result))
+                .expect("send stop result");
+        });
+
+        let (elapsed, result) = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stop sink should not block on live input");
+        result.expect("stop sink");
+        stop_producers.store(true, AtomicOrdering::Relaxed);
+        producer_thread.join().expect("join producer thread");
+
+        assert!(elapsed < Duration::from_secs(1));
+        assert!(chunk_count.load(AtomicOrdering::Relaxed) > 0);
     }
 }

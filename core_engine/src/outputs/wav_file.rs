@@ -1,7 +1,7 @@
 use crate::engine::RouteConsumer;
 use crate::format::{SampleFormat, StreamFormat};
 use crate::metrics::{LatencyHistogram, LatencyHistogramSnapshot};
-use ringbuf::traits::Consumer;
+use ringbuf::traits::{Consumer, Observer};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
@@ -121,6 +121,7 @@ impl WavFileOutput {
         let metrics = Arc::new(WavSinkMetrics::default());
         let metrics_thread = metrics.clone();
         let channels = format.channels.max(1) as u64;
+        let frame_channels = format.channels.max(1) as usize;
 
         let handle = thread::spawn(move || -> Result<(), WavOutputError> {
             let mut writer = hound::WavWriter::new(writer, spec)?;
@@ -133,13 +134,29 @@ impl WavFileOutput {
                 let stopping = stop_thread.load(Ordering::Relaxed);
                 let mut drained_any = false;
                 for (consumer, buffer) in consumers.iter_mut().zip(input_buffers.iter_mut()) {
-                    while let Some(sample) = consumer.try_pop() {
+                    let drain_limit = if stopping {
+                        consumer.occupied_len() / frame_channels * frame_channels
+                    } else {
+                        usize::MAX
+                    };
+                    let mut drained = 0_usize;
+                    while drained < drain_limit {
+                        let Some(sample) = consumer.try_pop() else {
+                            break;
+                        };
                         buffer.push_back(sample);
                         drained_any = true;
+                        drained += 1;
                     }
                 }
 
-                let ready_samples = input_buffers.iter().map(VecDeque::len).min().unwrap_or(0);
+                let ready_samples = input_buffers
+                    .iter()
+                    .map(VecDeque::len)
+                    .min()
+                    .unwrap_or(0)
+                    / frame_channels
+                    * frame_channels;
 
                 if ready_samples > 0 {
                     mixed_buffer.clear();
@@ -174,9 +191,6 @@ impl WavFileOutput {
                 }
 
                 if stopping {
-                    // Flush only what was already available when stop was requested.
-                    // Do not wait for sources to quiesce, or close() can keep recording
-                    // additional live audio from asynchronous inputs.
                     for input in &mut input_buffers {
                         input.clear();
                     }

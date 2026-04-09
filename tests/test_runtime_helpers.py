@@ -141,18 +141,63 @@ def test_audio_engine_close_is_idempotent(macloop_module) -> None:
     assert engine._backend.closed is True
 
 
-def test_audio_engine_close_swallows_sink_errors(macloop_module) -> None:
+def test_audio_engine_close_propagates_sink_errors_after_backend_cleanup(macloop_module) -> None:
     class FailingSink:
         def close(self) -> None:
             raise RuntimeError("boom")
 
     engine = macloop_module.AudioEngine()
-    engine._register_sink(FailingSink())
-    engine.close()
+    sink = FailingSink()
+    engine._register_sink(sink)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        engine.close()
 
     assert engine._backend.closed is True
     with pytest.raises(RuntimeError, match="audio engine is closed"):
         engine.stats()
+
+
+def test_sink_close_remains_idempotent_after_engine_close(macloop_module, tmp_path) -> None:
+    path = tmp_path / "after_engine_close.wav"
+
+    with macloop_module.AudioEngine() as engine:
+        stream = engine.create_stream(macloop_module.MicrophoneSource)
+        route_a = engine.route("after_engine_close_asr", stream=stream)
+        route_b = engine.route("after_engine_close_wav", stream=stream)
+        asr_sink = macloop_module.AsrSink(
+            routes=[route_a],
+            chunk_frames=2,
+            sample_rate=16000,
+            channels=1,
+            sample_format="f32",
+        )
+        wav_sink = macloop_module.WavSink(route=route_b, file=path)
+        engine.close()
+        asr_sink.close()
+        wav_sink.close()
+
+    assert asr_sink._closed is True
+    assert wav_sink._closed is True
+
+
+def test_audio_engine_close_propagates_backend_error_after_sink_cleanup(macloop_module) -> None:
+    class TrackingSink:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    engine = macloop_module.AudioEngine()
+    sink = TrackingSink()
+    engine._register_sink(sink)
+    engine._backend.close = lambda: (_ for _ in ()).throw(RuntimeError("backend boom"))
+
+    with pytest.raises(RuntimeError, match="backend boom"):
+        engine.close()
+
+    assert sink.closed is True
 
 
 def test_asr_sink_close_releases_routes_on_backend_error(macloop_module) -> None:
