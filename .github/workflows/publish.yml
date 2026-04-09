@@ -18,7 +18,7 @@ jobs:
     name: Run pytest
     runs-on: macos-15
     env:
-      RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
+      RUSTFLAGS: -C link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx -C link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       UV_CACHE_DIR: .uv-cache
     steps:
       - uses: actions/checkout@v5
@@ -98,7 +98,7 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     env:
-      RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
+      RUSTFLAGS: -C link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx -C link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       ARCHFLAGS: -arch x86_64 -arch arm64
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
