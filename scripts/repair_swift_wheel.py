@@ -78,8 +78,12 @@ def is_swift_dylib_install_name(install_name: str) -> bool:
     return basename.startswith(SWIFT_DYLIB_PREFIX) and basename.endswith(".dylib")
 
 
-def should_bundle_swift_install_name(install_name: str) -> bool:
-    return install_name.startswith("@rpath/") or install_name.startswith("/usr/lib/swift/")
+def is_system_swift_install_name(install_name: str) -> bool:
+    return install_name.startswith("/usr/lib/swift/")
+
+
+def is_toolchain_swift_install_name(install_name: str) -> bool:
+    return install_name.startswith(ABSOLUTE_SWIFT_PATH_PREFIXES)
 
 
 def find_root_binaries(staging_dir: pathlib.Path) -> list[pathlib.Path]:
@@ -219,6 +223,18 @@ def main() -> int:
         processed: set[pathlib.Path] = set()
         modified_binaries: set[pathlib.Path] = set()
         required_rpath_swift: set[str] = set()
+        satisfied_required_rpath_swift: set[str] = set()
+        system_swift_basenames: set[str] = set()
+
+        for binary_path in root_binaries:
+            for install_name in parse_otool_dependencies(binary_path):
+                if is_system_swift_install_name(install_name) and is_swift_dylib_install_name(install_name):
+                    system_swift_basenames.add(pathlib.Path(install_name).name)
+
+        if system_swift_basenames:
+            print("System Swift dylibs already referenced by root binaries:")
+            for basename in sorted(system_swift_basenames):
+                print(f"  /usr/lib/swift/{basename}")
 
         while queued:
             binary_path = queued.pop(0)
@@ -232,10 +248,29 @@ def main() -> int:
 
                 basename = pathlib.Path(install_name).name
                 must_bundle = install_name.startswith("@rpath/")
+                uses_system_swift = is_system_swift_install_name(install_name)
+                uses_toolchain_swift = is_toolchain_swift_install_name(install_name)
+
+                if uses_system_swift:
+                    system_swift_basenames.add(basename)
+                    continue
+
                 if must_bundle:
                     required_rpath_swift.add(basename)
 
-                if not should_bundle_swift_install_name(install_name):
+                system_install_name = f"/usr/lib/swift/{basename}"
+                if (must_bundle or uses_toolchain_swift) and basename in system_swift_basenames:
+                    if install_name != system_install_name:
+                        rewrite_dependency(binary_path, install_name, system_install_name)
+                        modified_binaries.add(binary_path)
+                        print(
+                            f"Rewrote {binary_path.relative_to(staging_dir).as_posix()}: {install_name} -> {system_install_name}"
+                        )
+                    if must_bundle:
+                        satisfied_required_rpath_swift.add(basename)
+                    continue
+
+                if not (must_bundle or uses_toolchain_swift):
                     continue
 
                 resolved = resolve_swift_library(basename, library_index)
@@ -266,6 +301,9 @@ def main() -> int:
                         f"Rewrote {binary_path.relative_to(staging_dir).as_posix()}: {install_name} -> {new_install_name}"
                     )
 
+                if must_bundle:
+                    satisfied_required_rpath_swift.add(basename)
+
         ad_hoc_codesign(sorted(modified_binaries))
 
         unresolved_after_repair: list[tuple[pathlib.Path, str]] = []
@@ -295,7 +333,11 @@ def main() -> int:
                 "Absolute Xcode/CommandLineTools Swift paths remain after repair:\n" + "\n".join(lines)
             )
 
-        missing_required = [name for name in sorted(required_rpath_swift) if name not in copied_libraries]
+        missing_required = [
+            name
+            for name in sorted(required_rpath_swift)
+            if name not in copied_libraries and name not in satisfied_required_rpath_swift
+        ]
         if missing_required:
             raise RepairError(
                 "Required Swift @rpath libraries were not bundled: " + ", ".join(missing_required)
