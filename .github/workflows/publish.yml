@@ -162,7 +162,7 @@ jobs:
             dist \
             "$MACOSX_DEPLOYMENT_TARGET"
 
-      - name: Smoke test repaired wheel
+      - name: Smoke test and inspect repaired wheel
         shell: bash
         run: |
           WHEEL=$(find dist -name '*.whl' | head -n 1)
