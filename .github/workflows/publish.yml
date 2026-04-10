@@ -42,25 +42,28 @@ jobs:
           for candidate in \
             "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
             "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
-            if [ -f "$candidate/libswift_Concurrency.dylib" ]; then
+            if [ -f "$candidate/libswiftCore.dylib" ]; then
               SWIFT_STDLIB_DIR="$candidate"
               break
             fi
           done
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswift_Concurrency.dylib' 2>/dev/null | head -n 1)
+            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswiftCore.dylib' 2>/dev/null | head -n 1)
             if [ -n "$SWIFT_LIB" ]; then
               SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
             fi
           fi
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            echo "Unable to locate libswift_Concurrency.dylib" >&2
+            echo "Unable to locate libswiftCore.dylib" >&2
             exit 1
           fi
+          TOOLCHAIN_SWIFT_DIR="$(cd "$SWIFT_STDLIB_DIR/.." && pwd)"
           echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
+          echo "Resolved TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR"
           echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR:$TOOLCHAIN_SWIFT_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-L$TOOLCHAIN_SWIFT_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$TOOLCHAIN_SWIFT_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: |
@@ -172,25 +175,28 @@ jobs:
           for candidate in \
             "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
             "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
-            if [ -f "$candidate/libswift_Concurrency.dylib" ]; then
+            if [ -f "$candidate/libswiftCore.dylib" ]; then
               SWIFT_STDLIB_DIR="$candidate"
               break
             fi
           done
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswift_Concurrency.dylib' 2>/dev/null | head -n 1)
+            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswiftCore.dylib' 2>/dev/null | head -n 1)
             if [ -n "$SWIFT_LIB" ]; then
               SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
             fi
           fi
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            echo "Unable to locate libswift_Concurrency.dylib" >&2
+            echo "Unable to locate libswiftCore.dylib" >&2
             exit 1
           fi
+          TOOLCHAIN_SWIFT_DIR="$(cd "$SWIFT_STDLIB_DIR/.." && pwd)"
           echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
+          echo "Resolved TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR"
           echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR:$TOOLCHAIN_SWIFT_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-L$TOOLCHAIN_SWIFT_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$TOOLCHAIN_SWIFT_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -200,7 +206,7 @@ jobs:
         run: |
           export PATH="$(dirname "$(rustup which cargo)"):$PATH"
           hash -r
-          test -f "$SWIFT_STDLIB_DIR/libswift_Concurrency.dylib"
+          test -f "$SWIFT_STDLIB_DIR/libswiftCore.dylib"
           which python
           python --version
           which cargo
@@ -261,25 +267,28 @@ jobs:
           for candidate in \
             "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
             "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
-            if [ -f "$candidate/libswift_Concurrency.dylib" ]; then
+            if [ -f "$candidate/libswiftCore.dylib" ]; then
               SWIFT_STDLIB_DIR="$candidate"
               break
             fi
           done
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswift_Concurrency.dylib' 2>/dev/null | head -n 1)
+            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswiftCore.dylib' 2>/dev/null | head -n 1)
             if [ -n "$SWIFT_LIB" ]; then
               SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
             fi
           fi
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            echo "Unable to locate libswift_Concurrency.dylib" >&2
+            echo "Unable to locate libswiftCore.dylib" >&2
             exit 1
           fi
+          TOOLCHAIN_SWIFT_DIR="$(cd "$SWIFT_STDLIB_DIR/.." && pwd)"
           echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
+          echo "Resolved TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR"
           echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR:$TOOLCHAIN_SWIFT_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-L$TOOLCHAIN_SWIFT_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$TOOLCHAIN_SWIFT_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
