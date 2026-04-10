@@ -128,9 +128,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15]
-        python-version: ["3.11"]
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+        include:
+          - os: macos-15
+            python-version: "3.11"
+            target: aarch64-apple-darwin
+          - os: macos-13
+            python-version: "3.11"
+            target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v5
