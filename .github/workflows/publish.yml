@@ -41,7 +41,11 @@ jobs:
           SWIFT_TARGET_INFO="$(swiftc -print-target-info)"
           echo "$SWIFT_TARGET_INFO"
 
-          mapfile -t SWIFT_RUNTIME_LIBRARY_PATHS < <(
+          SWIFT_RUNTIME_LIBRARY_PATHS=()
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            SWIFT_RUNTIME_LIBRARY_PATHS+=("$path")
+          done < <(
             python -c 'import json, sys; data = json.load(sys.stdin); [print(path) for path in data["paths"].get("runtimeLibraryPaths", []) if path]' <<<"$SWIFT_TARGET_INFO"
           )
           SWIFT_RUNTIME_RESOURCE_DIR="$(
@@ -247,7 +251,11 @@ jobs:
           SWIFT_TARGET_INFO="$(swiftc -target "$SWIFT_TARGET" -print-target-info)"
           echo "$SWIFT_TARGET_INFO"
 
-          mapfile -t SWIFT_RUNTIME_LIBRARY_PATHS < <(
+          SWIFT_RUNTIME_LIBRARY_PATHS=()
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            SWIFT_RUNTIME_LIBRARY_PATHS+=("$path")
+          done < <(
             python -c 'import json, sys; data = json.load(sys.stdin); [print(path) for path in data["paths"].get("runtimeLibraryPaths", []) if path]' <<<"$SWIFT_TARGET_INFO"
           )
           SWIFT_RUNTIME_RESOURCE_DIR="$(
@@ -414,7 +422,11 @@ jobs:
           SWIFT_TARGET_INFO="$(swiftc -target "$SWIFT_TARGET" -print-target-info)"
           echo "$SWIFT_TARGET_INFO"
 
-          mapfile -t SWIFT_RUNTIME_LIBRARY_PATHS < <(
+          SWIFT_RUNTIME_LIBRARY_PATHS=()
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            SWIFT_RUNTIME_LIBRARY_PATHS+=("$path")
+          done < <(
             python -c 'import json, sys; data = json.load(sys.stdin); [print(path) for path in data["paths"].get("runtimeLibraryPaths", []) if path]' <<<"$SWIFT_TARGET_INFO"
           )
           SWIFT_RUNTIME_RESOURCE_DIR="$(
