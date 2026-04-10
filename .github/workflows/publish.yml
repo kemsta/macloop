@@ -18,9 +18,6 @@ jobs:
     name: Run pytest
     runs-on: macos-15
     env:
-      SWIFT_STDLIB_DIR: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
-      DYLD_FALLBACK_LIBRARY_PATH: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
-      RUSTFLAGS: -C link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx -C link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       UV_CACHE_DIR: .uv-cache
     steps:
       - uses: actions/checkout@v5
@@ -37,6 +34,33 @@ jobs:
         run: |
           brew update
           brew install meson ninja pkg-config
+
+      - name: Resolve Swift stdlib path
+        shell: bash
+        run: |
+          SWIFT_STDLIB_DIR=""
+          for candidate in \
+            "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
+            if [ -f "$candidate/libswift_Concurrency.dylib" ]; then
+              SWIFT_STDLIB_DIR="$candidate"
+              break
+            fi
+          done
+          if [ -z "$SWIFT_STDLIB_DIR" ]; then
+            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswift_Concurrency.dylib' 2>/dev/null | head -n 1)
+            if [ -n "$SWIFT_LIB" ]; then
+              SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
+            fi
+          fi
+          if [ -z "$SWIFT_STDLIB_DIR" ]; then
+            echo "Unable to locate libswift_Concurrency.dylib" >&2
+            exit 1
+          fi
+          echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
+          echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: |
@@ -100,9 +124,6 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     env:
-      SWIFT_STDLIB_DIR: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
-      DYLD_FALLBACK_LIBRARY_PATH: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
-      RUSTFLAGS: -C link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx -C link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       ARCHFLAGS: -arch x86_64 -arch arm64
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
@@ -139,6 +160,33 @@ jobs:
         run: |
           brew update
           brew install meson ninja pkg-config
+
+      - name: Resolve Swift stdlib path
+        shell: bash
+        run: |
+          SWIFT_STDLIB_DIR=""
+          for candidate in \
+            "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
+            if [ -f "$candidate/libswift_Concurrency.dylib" ]; then
+              SWIFT_STDLIB_DIR="$candidate"
+              break
+            fi
+          done
+          if [ -z "$SWIFT_STDLIB_DIR" ]; then
+            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswift_Concurrency.dylib' 2>/dev/null | head -n 1)
+            if [ -n "$SWIFT_LIB" ]; then
+              SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
+            fi
+          fi
+          if [ -z "$SWIFT_STDLIB_DIR" ]; then
+            echo "Unable to locate libswift_Concurrency.dylib" >&2
+            exit 1
+          fi
+          echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
+          echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Add Rust targets for universal2
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
