@@ -3,14 +3,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Iterable
 
-from swift_runtime import (
-    build_swift_library_index,
-    get_swift_runtime_layout,
-    resolve_swift_library,
-    rust_target_to_swift_target,
-)
+from swift_runtime import get_swift_runtime_layout, rust_target_to_swift_target
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,24 +29,6 @@ def append_github_env(path: str, values: dict[str, str]) -> None:
             fh.write(f"{key}={value}\n")
 
 
-def collect_link_paths(candidate_dirs: Iterable[str], library_index: dict[str, list[str]]) -> list[str]:
-    link_paths = [path for path in candidate_dirs if path]
-
-    for library_name in ("libswiftCore.dylib", "libswift_Concurrency.dylib"):
-        resolved = resolve_swift_library(library_name, library_index)
-        if resolved:
-            link_paths.append(os.path.dirname(resolved))
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for path in link_paths:
-        if path in seen:
-            continue
-        seen.add(path)
-        deduped.append(path)
-    return deduped
-
-
 def main() -> int:
     args = parse_args()
 
@@ -67,24 +43,18 @@ def main() -> int:
     layout, target_info_output = get_swift_runtime_layout(swift_target)
     print(target_info_output)
 
-    library_index = build_swift_library_index(layout.candidate_dirs)
-    link_paths = collect_link_paths(layout.candidate_dirs, library_index)
-
-    stdlib_dir = resolve_swift_library("libswiftCore.dylib", library_index)
-    if not stdlib_dir:
-        raise SystemExit("swiftc target info did not yield a directory containing libswiftCore.dylib")
-    stdlib_dir = os.path.dirname(stdlib_dir)
-
-    print(f"Resolved SWIFT_STDLIB_DIR={stdlib_dir}")
     print(f"Resolved SWIFT_RUNTIME_RESOURCE_DIR={layout.runtime_resource_path}")
     print(f"Resolved SWIFT_TOOLCHAIN_LIB_ROOT={layout.toolchain_lib_root}")
-    print("Resolved Swift runtime search paths:")
-    for path in link_paths:
+    print("Resolved Swift link paths:")
+    for path in layout.link_paths:
+        print(f"  {path}")
+    print("Resolved Swift bundle search paths:")
+    for path in layout.bundle_search_paths:
         print(f"  {path}")
 
-    dyld_paths = ":".join(link_paths)
+    dyld_paths = ":".join(layout.link_paths)
     rustflags_parts = []
-    for path in link_paths:
+    for path in layout.link_paths:
         rustflags_parts.append(f"-C link-arg=-L{path}")
         rustflags_parts.append(f"-C link-arg=-Wl,-rpath,{path}")
     existing_rustflags = os.environ.get("RUSTFLAGS", "").strip()
@@ -98,10 +68,10 @@ def main() -> int:
 
     if args.github_env:
         values = {
-            "SWIFT_STDLIB_DIR": stdlib_dir,
             "SWIFT_RUNTIME_RESOURCE_DIR": layout.runtime_resource_path,
             "SWIFT_TOOLCHAIN_LIB_ROOT": layout.toolchain_lib_root,
-            "SWIFT_RUNTIME_SEARCH_PATHS": ":".join(link_paths),
+            "SWIFT_LINK_PATHS": ":".join(layout.link_paths),
+            "SWIFT_BUNDLE_SEARCH_PATHS": ":".join(layout.bundle_search_paths),
             "DYLD_FALLBACK_LIBRARY_PATH": dyld_paths,
             "RUSTFLAGS": rustflags,
         }

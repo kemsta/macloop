@@ -14,6 +14,11 @@ import tempfile
 import zipfile
 from typing import Iterable
 
+ABSOLUTE_SWIFT_PATH_PREFIXES = (
+    "/Applications/Xcode",
+    "/Library/Developer/CommandLineTools",
+)
+
 from swift_runtime import (
     build_swift_library_index,
     get_swift_runtime_layout,
@@ -186,11 +191,11 @@ def main() -> int:
     layout, target_info_output = get_swift_runtime_layout(swift_target)
     print(target_info_output)
     print(f"Resolved SWIFT_TOOLCHAIN_LIB_ROOT={layout.toolchain_lib_root}")
-    print("Resolved Swift candidate dirs:")
-    for path in layout.candidate_dirs:
+    print("Resolved Swift bundle search paths:")
+    for path in layout.bundle_search_paths:
         print(f"  {path}")
 
-    library_index = build_swift_library_index(layout.candidate_dirs)
+    library_index = build_swift_library_index(layout.bundle_search_paths)
 
     temp_dir_obj = tempfile.TemporaryDirectory(prefix="repair-swift-wheel-")
     try:
@@ -237,7 +242,7 @@ def main() -> int:
                 if not resolved:
                     if must_bundle:
                         raise RepairError(
-                            f"Unable to resolve required Swift library {basename} inside active toolchain candidates"
+                            f"Unable to resolve required Swift library {basename} inside active toolchain bundle search paths"
                         )
                     print(f"Leaving unresolved system Swift dependency in place: {install_name}")
                     continue
@@ -264,10 +269,15 @@ def main() -> int:
         ad_hoc_codesign(sorted(modified_binaries))
 
         unresolved_after_repair: list[tuple[pathlib.Path, str]] = []
+        absolute_toolchain_swift_paths: list[tuple[pathlib.Path, str]] = []
         for binary_path in sorted(processed):
             for install_name in parse_otool_dependencies(binary_path):
-                if install_name.startswith("@rpath/") and is_swift_dylib_install_name(install_name):
+                if not is_swift_dylib_install_name(install_name):
+                    continue
+                if install_name.startswith("@rpath/"):
                     unresolved_after_repair.append((binary_path, install_name))
+                if install_name.startswith(ABSOLUTE_SWIFT_PATH_PREFIXES):
+                    absolute_toolchain_swift_paths.append((binary_path, install_name))
 
         if unresolved_after_repair:
             lines = [
@@ -275,6 +285,15 @@ def main() -> int:
                 for binary, install_name in unresolved_after_repair
             ]
             raise RepairError("Unresolved Swift @rpath dependencies remain after repair:\n" + "\n".join(lines))
+
+        if absolute_toolchain_swift_paths:
+            lines = [
+                f"{binary.relative_to(staging_dir).as_posix()}: {install_name}"
+                for binary, install_name in absolute_toolchain_swift_paths
+            ]
+            raise RepairError(
+                "Absolute Xcode/CommandLineTools Swift paths remain after repair:\n" + "\n".join(lines)
+            )
 
         missing_required = [name for name in sorted(required_rpath_swift) if name not in copied_libraries]
         if missing_required:

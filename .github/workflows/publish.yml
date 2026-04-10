@@ -1,5 +1,9 @@
 name: Build And Publish
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   pull_request:
@@ -40,8 +44,7 @@ jobs:
 
       - name: Run tests
         run: |
-          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop --no-install-local
-          .venv/bin/maturin develop --manifest-path python_ffi/Cargo.toml
+          bash scripts/ci_setup_test_env.sh
           .venv/bin/pytest -q tests
 
       - name: Install Rust coverage tooling
@@ -53,8 +56,7 @@ jobs:
       - name: Generate Python coverage report
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         run: |
-          uv sync --group dev --no-install-project --no-install-workspace --no-install-package macloop --no-install-local
-          .venv/bin/maturin develop --manifest-path python_ffi/Cargo.toml
+          bash scripts/ci_setup_test_env.sh
           .venv/bin/pytest \
             --cov=macloop \
             --cov-report=xml:python-coverage.xml \
@@ -71,7 +73,7 @@ jobs:
           export CARGO_TARGET_DIR="${CARGO_LLVM_COV_TARGET_DIR:-target/llvm-cov-target}"
           export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
           cargo llvm-cov --workspace --no-report
-          .venv/bin/maturin develop --manifest-path python_ffi/Cargo.toml
+          bash scripts/ci_setup_test_env.sh
           .venv/bin/pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
           cargo llvm-cov report --lcov --output-path rust-lcov.info
 
@@ -151,29 +153,21 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Build wheel
+      - name: Build and repair wheel
         shell: bash
         run: |
-          export PATH="$(dirname "$(rustup which cargo)"):$PATH"
-          hash -r
-          test -f "$SWIFT_STDLIB_DIR/libswiftCore.dylib"
-          which python
-          python --version
-          which cargo
-          cargo -vV
-          which rustc
-          rustc -vV
-          python -m maturin build --release --auditwheel skip --target ${{ matrix.target }} --out dist
+          # Swift dylib bundling is handled by scripts/repair_swift_wheel.py, not maturin repair.
+          bash scripts/ci_build_and_repair_wheel.sh \
+            "${{ matrix.target }}" \
+            dist \
+            "$MACOSX_DEPLOYMENT_TARGET"
 
-      - name: Repair Swift wheel
+      - name: Smoke test repaired wheel
         shell: bash
         run: |
           WHEEL=$(find dist -name '*.whl' | head -n 1)
           test -n "$WHEEL"
-          python scripts/repair_swift_wheel.py \
-            "$WHEEL" \
-            --rust-target "${{ matrix.target }}" \
-            --deployment-target "$MACOSX_DEPLOYMENT_TARGET"
+          bash scripts/ci_smoke_test_wheel.sh "$WHEEL"
 
       - name: Build sdist
         if: matrix.os == 'macos-15' && matrix.target == 'aarch64-apple-darwin'

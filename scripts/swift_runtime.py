@@ -16,7 +16,8 @@ class SwiftRuntimeLayout:
     runtime_library_paths: list[str]
     runtime_resource_path: str
     toolchain_lib_root: str
-    candidate_dirs: list[str]
+    link_paths: list[str]
+    bundle_search_paths: list[str]
 
 
 def rust_target_to_swift_target(rust_target: str, deployment_target: str) -> str:
@@ -77,7 +78,7 @@ def dedupe_paths(paths: Iterable[str]) -> list[str]:
     return result
 
 
-def collect_candidate_dirs(target_info: dict) -> tuple[list[str], str, str, list[str]]:
+def collect_runtime_layout(target_info: dict) -> tuple[list[str], str, str, list[str], list[str]]:
     paths = target_info.get("paths", {})
     runtime_library_paths = [str(pathlib.Path(p)) for p in paths.get("runtimeLibraryPaths", []) if p]
     runtime_resource_path = str(pathlib.Path(paths.get("runtimeResourcePath", ""))) if paths.get("runtimeResourcePath") else ""
@@ -88,9 +89,8 @@ def collect_candidate_dirs(target_info: dict) -> tuple[list[str], str, str, list
     toolchain_lib_root = str(pathlib.Path(runtime_resource_path).parent)
     lib_root_path = pathlib.Path(toolchain_lib_root)
 
-    candidates: list[str] = []
-    candidates.extend(runtime_library_paths)
-    candidates.append(runtime_resource_path)
+    link_paths = dedupe_paths([*runtime_library_paths, runtime_resource_path])
+    bundle_search_paths = list(link_paths)
 
     if lib_root_path.exists():
         versioned_dirs: list[pathlib.Path] = []
@@ -102,14 +102,14 @@ def collect_candidate_dirs(target_info: dict) -> tuple[list[str], str, str, list
                 versioned_dirs.append(macosx_dir)
             elif any(grandchild.suffix == ".dylib" for grandchild in child.glob("libswift*.dylib")):
                 versioned_dirs.append(child)
-        candidates.extend(str(path) for path in sorted(versioned_dirs, key=version_key))
+        bundle_search_paths.extend(str(path) for path in sorted(versioned_dirs, key=version_key))
 
-    return dedupe_paths(candidates), runtime_resource_path, toolchain_lib_root, runtime_library_paths
+    return link_paths, runtime_resource_path, toolchain_lib_root, runtime_library_paths, dedupe_paths(bundle_search_paths)
 
 
 def get_swift_runtime_layout(swift_target: str | None = None) -> tuple[SwiftRuntimeLayout, str]:
     target_info_output, target_info = run_swift_target_info(swift_target)
-    candidate_dirs, runtime_resource_path, toolchain_lib_root, runtime_library_paths = collect_candidate_dirs(target_info)
+    link_paths, runtime_resource_path, toolchain_lib_root, runtime_library_paths, bundle_search_paths = collect_runtime_layout(target_info)
     return (
         SwiftRuntimeLayout(
             swift_target=swift_target,
@@ -117,7 +117,8 @@ def get_swift_runtime_layout(swift_target: str | None = None) -> tuple[SwiftRunt
             runtime_library_paths=runtime_library_paths,
             runtime_resource_path=runtime_resource_path,
             toolchain_lib_root=toolchain_lib_root,
-            candidate_dirs=candidate_dirs,
+            link_paths=link_paths,
+            bundle_search_paths=bundle_search_paths,
         ),
         target_info_output,
     )
