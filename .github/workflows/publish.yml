@@ -39,7 +39,7 @@ jobs:
           brew update
           brew install meson ninja pkg-config
 
-      - name: Resolve Swift stdlib path
+      - name: Resolve Swift runtime paths
         run: python scripts/resolve_swift_runtime.py --github-env "$GITHUB_ENV"
 
       - name: Run tests
@@ -143,7 +143,7 @@ jobs:
           brew update
           brew install meson ninja pkg-config
 
-      - name: Resolve Swift stdlib path
+      - name: Resolve Swift runtime paths
         run: |
           python scripts/resolve_swift_runtime.py \
             --rust-target "${{ matrix.target }}" \

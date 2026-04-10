@@ -78,6 +78,14 @@ def dedupe_paths(paths: Iterable[str]) -> list[str]:
     return result
 
 
+def is_within_directory(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def collect_runtime_layout(target_info: dict) -> tuple[list[str], str, str, list[str], list[str]]:
     paths = target_info.get("paths", {})
     runtime_library_paths = [str(pathlib.Path(p)) for p in paths.get("runtimeLibraryPaths", []) if p]
@@ -88,20 +96,31 @@ def collect_runtime_layout(target_info: dict) -> tuple[list[str], str, str, list
 
     toolchain_lib_root = str(pathlib.Path(runtime_resource_path).parent)
     lib_root_path = pathlib.Path(toolchain_lib_root)
+    runtime_resource_dir = pathlib.Path(runtime_resource_path)
 
     link_paths = dedupe_paths([*runtime_library_paths, runtime_resource_path])
-    bundle_search_paths = list(link_paths)
+
+    bundle_search_paths: list[str] = []
+    if is_within_directory(runtime_resource_dir, lib_root_path):
+        bundle_search_paths.append(str(runtime_resource_dir))
+
+    for raw_path in runtime_library_paths:
+        path = pathlib.Path(raw_path)
+        if is_within_directory(path, lib_root_path):
+            bundle_search_paths.append(str(path))
+
+    toolchain_macosx_dir = runtime_resource_dir / "macosx"
+    if toolchain_macosx_dir.is_dir():
+        bundle_search_paths.append(str(toolchain_macosx_dir))
 
     if lib_root_path.exists():
         versioned_dirs: list[pathlib.Path] = []
         for child in lib_root_path.iterdir():
-            if not child.is_dir() or not child.name.startswith("swift"):
+            if not child.is_dir() or not child.name.startswith("swift-"):
                 continue
             macosx_dir = child / "macosx"
             if macosx_dir.is_dir():
                 versioned_dirs.append(macosx_dir)
-            elif any(grandchild.suffix == ".dylib" for grandchild in child.glob("libswift*.dylib")):
-                versioned_dirs.append(child)
         bundle_search_paths.extend(str(path) for path in sorted(versioned_dirs, key=version_key))
 
     return link_paths, runtime_resource_path, toolchain_lib_root, runtime_library_paths, dedupe_paths(bundle_search_paths)

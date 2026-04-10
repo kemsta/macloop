@@ -73,6 +73,22 @@ def parse_otool_dependencies(binary_path: pathlib.Path) -> list[str]:
     return dependencies
 
 
+def parse_otool_rpaths(binary_path: pathlib.Path) -> list[str]:
+    output = run(["otool", "-l", str(binary_path)], capture_output=True)
+    lines = output.splitlines()
+    rpaths: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() != "cmd LC_RPATH":
+            continue
+        for candidate in lines[index + 1 : index + 8]:
+            stripped = candidate.strip()
+            if not stripped.startswith("path "):
+                continue
+            rpaths.append(stripped.split(" (offset ", 1)[0].split(" ", 1)[1])
+            break
+    return rpaths
+
+
 def is_swift_dylib_install_name(install_name: str) -> bool:
     basename = pathlib.Path(install_name).name
     return basename.startswith(SWIFT_DYLIB_PREFIX) and basename.endswith(".dylib")
@@ -120,7 +136,8 @@ def copy_and_thin_library(source: pathlib.Path, destination: pathlib.Path, targe
             text=True,
         )
         if result.returncode != 0:
-            shutil.copy2(source, destination)
+            stderr = result.stderr.strip() or result.stdout.strip() or "unknown lipo error"
+            raise RepairError(f"Unable to thin {source} to architecture {target_arch}: {stderr}")
     else:
         shutil.copy2(source, destination)
     shutil.copymode(source, destination)
@@ -132,6 +149,10 @@ def set_dylib_id(binary_path: pathlib.Path, new_id: str) -> None:
 
 def rewrite_dependency(binary_path: pathlib.Path, old: str, new: str) -> None:
     subprocess.run(["install_name_tool", "-change", old, new, str(binary_path)], check=True)
+
+
+def delete_rpath(binary_path: pathlib.Path, old_rpath: str) -> None:
+    subprocess.run(["install_name_tool", "-delete_rpath", old_rpath, str(binary_path)], check=True)
 
 
 def ad_hoc_codesign(binary_paths: Iterable[pathlib.Path]) -> None:
@@ -304,10 +325,18 @@ def main() -> int:
                 if must_bundle:
                     satisfied_required_rpath_swift.add(basename)
 
+        for binary_path in sorted(processed):
+            for rpath in parse_otool_rpaths(binary_path):
+                if rpath.startswith(ABSOLUTE_SWIFT_PATH_PREFIXES):
+                    delete_rpath(binary_path, rpath)
+                    modified_binaries.add(binary_path)
+                    print(f"Deleted RPATH from {binary_path.relative_to(staging_dir).as_posix()}: {rpath}")
+
         ad_hoc_codesign(sorted(modified_binaries))
 
         unresolved_after_repair: list[tuple[pathlib.Path, str]] = []
         absolute_toolchain_swift_paths: list[tuple[pathlib.Path, str]] = []
+        absolute_toolchain_rpaths: list[tuple[pathlib.Path, str]] = []
         for binary_path in sorted(processed):
             for install_name in parse_otool_dependencies(binary_path):
                 if not is_swift_dylib_install_name(install_name):
@@ -316,6 +345,9 @@ def main() -> int:
                     unresolved_after_repair.append((binary_path, install_name))
                 if install_name.startswith(ABSOLUTE_SWIFT_PATH_PREFIXES):
                     absolute_toolchain_swift_paths.append((binary_path, install_name))
+            for rpath in parse_otool_rpaths(binary_path):
+                if rpath.startswith(ABSOLUTE_SWIFT_PATH_PREFIXES):
+                    absolute_toolchain_rpaths.append((binary_path, rpath))
 
         if unresolved_after_repair:
             lines = [
@@ -331,6 +363,15 @@ def main() -> int:
             ]
             raise RepairError(
                 "Absolute Xcode/CommandLineTools Swift paths remain after repair:\n" + "\n".join(lines)
+            )
+
+        if absolute_toolchain_rpaths:
+            lines = [
+                f"{binary.relative_to(staging_dir).as_posix()}: {rpath}"
+                for binary, rpath in absolute_toolchain_rpaths
+            ]
+            raise RepairError(
+                "Absolute Xcode/CommandLineTools RPATH entries remain after repair:\n" + "\n".join(lines)
             )
 
         missing_required = [
