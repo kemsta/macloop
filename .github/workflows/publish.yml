@@ -163,7 +163,17 @@ jobs:
           cargo -vV
           which rustc
           rustc -vV
-          python -m maturin build --release --target ${{ matrix.target }} --out dist
+          python -m maturin build --release --auditwheel skip --target ${{ matrix.target }} --out dist
+
+      - name: Repair Swift wheel
+        shell: bash
+        run: |
+          WHEEL=$(find dist -name '*.whl' | head -n 1)
+          test -n "$WHEEL"
+          python scripts/repair_swift_wheel.py \
+            "$WHEEL" \
+            --rust-target "${{ matrix.target }}" \
+            --deployment-target "$MACOSX_DEPLOYMENT_TARGET"
 
       - name: Build sdist
         if: matrix.os == 'macos-15' && matrix.target == 'aarch64-apple-darwin'
@@ -244,8 +254,23 @@ jobs:
             cargo -vV
             which rustc
             rustc -vV
-            python -m maturin build --release --target ${{ matrix.target }} --out dist
+            python -m maturin build --release --auditwheel skip --target ${{ matrix.target }} --out dist
           } 2>&1 | tee out/ci-debug/build-x86_64.log
+
+      - name: Repair x86_64 wheel (debug)
+        id: repair_x86
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p out/ci-debug
+          WHEEL=$(find dist -name '*.whl' | head -n 1)
+          test -n "$WHEEL"
+          {
+            python scripts/repair_swift_wheel.py \
+              "$WHEEL" \
+              --rust-target "${{ matrix.target }}" \
+              --deployment-target "$MACOSX_DEPLOYMENT_TARGET"
+          } 2>&1 | tee out/ci-debug/repair-x86_64.log
 
       - name: Post-build Swift runtime debug
         if: ${{ always() }}

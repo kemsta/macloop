@@ -97,7 +97,9 @@ with zipfile.ZipFile(wheel) as zf:
     zf.extractall(out)
 PY
     echo "extracted to: $TMPDIR_CREATED" >&2
-    find "$TMPDIR_CREATED" \( -name '*.so' -o -name '*.dylib' \) | head -n 20 >&2
+    find "$TMPDIR_CREATED" \( -name '*.so' -o -name '*.dylib' \) | head -n 50 >&2
+    echo "wheel-local Swift dylibs:" >&2
+    find "$TMPDIR_CREATED" -path '*/.dylibs/libswift*.dylib' | sort | head -n 50 >&2
     find "$TMPDIR_CREATED" -name '*.so' | head -n 1
   else
     printf '%s\n' "$path"
@@ -151,6 +153,16 @@ if [[ -n "$TARGET_PATH" ]]; then
   RESOLVED_BIN="$(resolve_target_binary "$TARGET_PATH")"
   if [[ -n "$RESOLVED_BIN" && -e "$RESOLVED_BIN" ]]; then
     inspect_binary "$RESOLVED_BIN"
+    if [[ -n "$TMPDIR_CREATED" && -d "$TMPDIR_CREATED" ]]; then
+      section "Wheel-local Swift dylibs"
+      find "$TMPDIR_CREATED" -path '*/.dylibs/libswift*.dylib' | sort || true
+      for dylib in \
+        "$TMPDIR_CREATED"/macloop/.dylibs/libswift_Concurrency.dylib \
+        "$TMPDIR_CREATED"/macloop/.dylibs/libswiftCore.dylib \
+        "$TMPDIR_CREATED"/macloop/.dylibs/libswiftFoundation.dylib; do
+        inspect_swift_dylib "$dylib"
+      done
+    fi
   else
     echo "No binary resolved from target path: $TARGET_PATH"
   fi
