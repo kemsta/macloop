@@ -18,6 +18,8 @@ jobs:
     name: Run pytest
     runs-on: macos-15
     env:
+      SWIFT_STDLIB_DIR: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
+      DYLD_FALLBACK_LIBRARY_PATH: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       RUSTFLAGS: -C link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx -C link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       UV_CACHE_DIR: .uv-cache
     steps:
@@ -98,6 +100,8 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     env:
+      SWIFT_STDLIB_DIR: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
+      DYLD_FALLBACK_LIBRARY_PATH: /Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       RUSTFLAGS: -C link-arg=-L/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx -C link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx
       ARCHFLAGS: -arch x86_64 -arch arm64
       MACOSX_DEPLOYMENT_TARGET: "11.0"
