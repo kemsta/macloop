@@ -113,6 +113,12 @@ printf 'SDKROOT=%s\n' "${SDKROOT:-}"
 printf 'DYLD_FALLBACK_LIBRARY_PATH=%s\n' "${DYLD_FALLBACK_LIBRARY_PATH:-}"
 printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS:-}"
 
+section "Swift compiler"
+print_cmd xcrun --find swiftc || true
+print_cmd swiftc --version || true
+section "swiftc target info"
+print_cmd swiftc -print-target-info || true
+
 section "Candidate Swift stdlib dirs"
 CANDIDATES=(
   "/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx"

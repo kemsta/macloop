@@ -38,32 +38,92 @@ jobs:
       - name: Resolve Swift stdlib path
         shell: bash
         run: |
+          SWIFT_TARGET_INFO="$(swiftc -print-target-info)"
+          echo "$SWIFT_TARGET_INFO"
+
+          mapfile -t SWIFT_RUNTIME_LIBRARY_PATHS < <(
+            python -c 'import json, sys; data = json.load(sys.stdin); [print(path) for path in data["paths"].get("runtimeLibraryPaths", []) if path]' <<<"$SWIFT_TARGET_INFO"
+          )
+          SWIFT_RUNTIME_RESOURCE_DIR="$(
+            python -c 'import json, sys; print(json.load(sys.stdin)["paths"].get("runtimeResourcePath", ""))' <<<"$SWIFT_TARGET_INFO"
+          )"
+
+          SEARCH_PATHS=("${SWIFT_RUNTIME_LIBRARY_PATHS[@]}")
+          [ -n "$SWIFT_RUNTIME_RESOURCE_DIR" ] && SEARCH_PATHS+=("$SWIFT_RUNTIME_RESOURCE_DIR")
+          if [ -n "$SWIFT_RUNTIME_RESOURCE_DIR" ]; then
+            while IFS= read -r candidate; do
+              [ -n "$candidate" ] || continue
+              SEARCH_PATHS+=("$candidate")
+            done < <(
+              python - "$SWIFT_RUNTIME_RESOURCE_DIR" <<'PY'
+import pathlib, re, sys
+resource = pathlib.Path(sys.argv[1])
+parent = resource.parent
+candidates = []
+if parent.exists():
+    for child in parent.glob("swift*/macosx"):
+        if (child / "libswiftCore.dylib").exists():
+            candidates.append(child)
+
+def version_key(path: pathlib.Path):
+    match = re.search(r"swift-(.+?)(?:/|$)", str(path))
+    if not match:
+        return ()
+    parts = []
+    for piece in re.split(r"[.-]", match.group(1)):
+        try:
+            parts.append((0, int(piece)))
+        except ValueError:
+            parts.append((1, piece))
+    return tuple(parts)
+
+for child in sorted(candidates, key=version_key, reverse=True):
+    print(child)
+PY
+            )
+          fi
+
+          UNIQUE_PATHS=()
+          for candidate in "${SEARCH_PATHS[@]}"; do
+            [ -n "$candidate" ] || continue
+            already_present=""
+            for existing in "${UNIQUE_PATHS[@]}"; do
+              if [ "$existing" = "$candidate" ]; then
+                already_present=1
+                break
+              fi
+            done
+            [ -n "$already_present" ] || UNIQUE_PATHS+=("$candidate")
+          done
+          SEARCH_PATHS=("${UNIQUE_PATHS[@]}")
+
           SWIFT_STDLIB_DIR=""
-          for candidate in \
-            "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
-            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
+          for candidate in "${SEARCH_PATHS[@]}"; do
             if [ -f "$candidate/libswiftCore.dylib" ]; then
               SWIFT_STDLIB_DIR="$candidate"
               break
             fi
           done
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswiftCore.dylib' 2>/dev/null | head -n 1)
-            if [ -n "$SWIFT_LIB" ]; then
-              SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
-            fi
-          fi
-          if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            echo "Unable to locate libswiftCore.dylib" >&2
+            echo "swiftc target info did not yield a directory containing libswiftCore.dylib" >&2
+            printf 'candidate: %s\n' "${SEARCH_PATHS[@]}" >&2
             exit 1
           fi
-          TOOLCHAIN_SWIFT_DIR="$(cd "$SWIFT_STDLIB_DIR/.." && pwd)"
+
+          DYLD_SWIFT_PATHS="$(IFS=:; echo "${SEARCH_PATHS[*]}")"
+          SWIFT_RUSTFLAGS=""
+          for candidate in "${SEARCH_PATHS[@]}"; do
+            SWIFT_RUSTFLAGS="$SWIFT_RUSTFLAGS -C link-arg=-L$candidate -C link-arg=-Wl,-rpath,$candidate"
+          done
+
           echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
-          echo "Resolved TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR"
+          echo "Resolved SWIFT_RUNTIME_RESOURCE_DIR=$SWIFT_RUNTIME_RESOURCE_DIR"
+          printf 'Resolved Swift runtime search paths:\n'
+          printf '  %s\n' "${SEARCH_PATHS[@]}"
           echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
-          echo "TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR:$TOOLCHAIN_SWIFT_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-L$TOOLCHAIN_SWIFT_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$TOOLCHAIN_SWIFT_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+          echo "SWIFT_RUNTIME_RESOURCE_DIR=$SWIFT_RUNTIME_RESOURCE_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$DYLD_SWIFT_PATHS${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${SWIFT_RUSTFLAGS# } ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Run tests
         run: |
@@ -171,32 +231,107 @@ jobs:
       - name: Resolve Swift stdlib path
         shell: bash
         run: |
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)
+              SWIFT_TARGET="arm64-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
+              ;;
+            x86_64-apple-darwin)
+              SWIFT_TARGET="x86_64-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
+              ;;
+            *)
+              echo "Unsupported Rust target for Swift runtime resolution: ${{ matrix.target }}" >&2
+              exit 1
+              ;;
+          esac
+
+          SWIFT_TARGET_INFO="$(swiftc -target "$SWIFT_TARGET" -print-target-info)"
+          echo "$SWIFT_TARGET_INFO"
+
+          mapfile -t SWIFT_RUNTIME_LIBRARY_PATHS < <(
+            python -c 'import json, sys; data = json.load(sys.stdin); [print(path) for path in data["paths"].get("runtimeLibraryPaths", []) if path]' <<<"$SWIFT_TARGET_INFO"
+          )
+          SWIFT_RUNTIME_RESOURCE_DIR="$(
+            python -c 'import json, sys; print(json.load(sys.stdin)["paths"].get("runtimeResourcePath", ""))' <<<"$SWIFT_TARGET_INFO"
+          )"
+
+          SEARCH_PATHS=("${SWIFT_RUNTIME_LIBRARY_PATHS[@]}")
+          [ -n "$SWIFT_RUNTIME_RESOURCE_DIR" ] && SEARCH_PATHS+=("$SWIFT_RUNTIME_RESOURCE_DIR")
+          if [ -n "$SWIFT_RUNTIME_RESOURCE_DIR" ]; then
+            while IFS= read -r candidate; do
+              [ -n "$candidate" ] || continue
+              SEARCH_PATHS+=("$candidate")
+            done < <(
+              python - "$SWIFT_RUNTIME_RESOURCE_DIR" <<'PY'
+import pathlib, re, sys
+resource = pathlib.Path(sys.argv[1])
+parent = resource.parent
+candidates = []
+if parent.exists():
+    for child in parent.glob("swift*/macosx"):
+        if (child / "libswiftCore.dylib").exists():
+            candidates.append(child)
+
+def version_key(path: pathlib.Path):
+    match = re.search(r"swift-(.+?)(?:/|$)", str(path))
+    if not match:
+        return ()
+    parts = []
+    for piece in re.split(r"[.-]", match.group(1)):
+        try:
+            parts.append((0, int(piece)))
+        except ValueError:
+            parts.append((1, piece))
+    return tuple(parts)
+
+for child in sorted(candidates, key=version_key, reverse=True):
+    print(child)
+PY
+            )
+          fi
+
+          UNIQUE_PATHS=()
+          for candidate in "${SEARCH_PATHS[@]}"; do
+            [ -n "$candidate" ] || continue
+            already_present=""
+            for existing in "${UNIQUE_PATHS[@]}"; do
+              if [ "$existing" = "$candidate" ]; then
+                already_present=1
+                break
+              fi
+            done
+            [ -n "$already_present" ] || UNIQUE_PATHS+=("$candidate")
+          done
+          SEARCH_PATHS=("${UNIQUE_PATHS[@]}")
+
           SWIFT_STDLIB_DIR=""
-          for candidate in \
-            "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
-            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
+          for candidate in "${SEARCH_PATHS[@]}"; do
             if [ -f "$candidate/libswiftCore.dylib" ]; then
               SWIFT_STDLIB_DIR="$candidate"
               break
             fi
           done
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswiftCore.dylib' 2>/dev/null | head -n 1)
-            if [ -n "$SWIFT_LIB" ]; then
-              SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
-            fi
-          fi
-          if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            echo "Unable to locate libswiftCore.dylib" >&2
+            echo "swiftc target info did not yield a directory containing libswiftCore.dylib" >&2
+            printf 'candidate: %s\n' "${SEARCH_PATHS[@]}" >&2
             exit 1
           fi
-          TOOLCHAIN_SWIFT_DIR="$(cd "$SWIFT_STDLIB_DIR/.." && pwd)"
+
+          DYLD_SWIFT_PATHS="$(IFS=:; echo "${SEARCH_PATHS[*]}")"
+          SWIFT_RUSTFLAGS=""
+          for candidate in "${SEARCH_PATHS[@]}"; do
+            SWIFT_RUSTFLAGS="$SWIFT_RUSTFLAGS -C link-arg=-L$candidate -C link-arg=-Wl,-rpath,$candidate"
+          done
+
+          echo "Resolved SWIFT_TARGET=$SWIFT_TARGET"
           echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
-          echo "Resolved TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR"
+          echo "Resolved SWIFT_RUNTIME_RESOURCE_DIR=$SWIFT_RUNTIME_RESOURCE_DIR"
+          printf 'Resolved Swift runtime search paths:\n'
+          printf '  %s\n' "${SEARCH_PATHS[@]}"
+          echo "SWIFT_TARGET=$SWIFT_TARGET" >> "$GITHUB_ENV"
           echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
-          echo "TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR:$TOOLCHAIN_SWIFT_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-L$TOOLCHAIN_SWIFT_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$TOOLCHAIN_SWIFT_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+          echo "SWIFT_RUNTIME_RESOURCE_DIR=$SWIFT_RUNTIME_RESOURCE_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$DYLD_SWIFT_PATHS${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${SWIFT_RUSTFLAGS# } ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -263,32 +398,107 @@ jobs:
       - name: Resolve Swift stdlib path
         shell: bash
         run: |
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)
+              SWIFT_TARGET="arm64-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
+              ;;
+            x86_64-apple-darwin)
+              SWIFT_TARGET="x86_64-apple-macosx${MACOSX_DEPLOYMENT_TARGET}"
+              ;;
+            *)
+              echo "Unsupported Rust target for Swift runtime resolution: ${{ matrix.target }}" >&2
+              exit 1
+              ;;
+          esac
+
+          SWIFT_TARGET_INFO="$(swiftc -target "$SWIFT_TARGET" -print-target-info)"
+          echo "$SWIFT_TARGET_INFO"
+
+          mapfile -t SWIFT_RUNTIME_LIBRARY_PATHS < <(
+            python -c 'import json, sys; data = json.load(sys.stdin); [print(path) for path in data["paths"].get("runtimeLibraryPaths", []) if path]' <<<"$SWIFT_TARGET_INFO"
+          )
+          SWIFT_RUNTIME_RESOURCE_DIR="$(
+            python -c 'import json, sys; print(json.load(sys.stdin)["paths"].get("runtimeResourcePath", ""))' <<<"$SWIFT_TARGET_INFO"
+          )"
+
+          SEARCH_PATHS=("${SWIFT_RUNTIME_LIBRARY_PATHS[@]}")
+          [ -n "$SWIFT_RUNTIME_RESOURCE_DIR" ] && SEARCH_PATHS+=("$SWIFT_RUNTIME_RESOURCE_DIR")
+          if [ -n "$SWIFT_RUNTIME_RESOURCE_DIR" ]; then
+            while IFS= read -r candidate; do
+              [ -n "$candidate" ] || continue
+              SEARCH_PATHS+=("$candidate")
+            done < <(
+              python - "$SWIFT_RUNTIME_RESOURCE_DIR" <<'PY'
+import pathlib, re, sys
+resource = pathlib.Path(sys.argv[1])
+parent = resource.parent
+candidates = []
+if parent.exists():
+    for child in parent.glob("swift*/macosx"):
+        if (child / "libswiftCore.dylib").exists():
+            candidates.append(child)
+
+def version_key(path: pathlib.Path):
+    match = re.search(r"swift-(.+?)(?:/|$)", str(path))
+    if not match:
+        return ()
+    parts = []
+    for piece in re.split(r"[.-]", match.group(1)):
+        try:
+            parts.append((0, int(piece)))
+        except ValueError:
+            parts.append((1, piece))
+    return tuple(parts)
+
+for child in sorted(candidates, key=version_key, reverse=True):
+    print(child)
+PY
+            )
+          fi
+
+          UNIQUE_PATHS=()
+          for candidate in "${SEARCH_PATHS[@]}"; do
+            [ -n "$candidate" ] || continue
+            already_present=""
+            for existing in "${UNIQUE_PATHS[@]}"; do
+              if [ "$existing" = "$candidate" ]; then
+                already_present=1
+                break
+              fi
+            done
+            [ -n "$already_present" ] || UNIQUE_PATHS+=("$candidate")
+          done
+          SEARCH_PATHS=("${UNIQUE_PATHS[@]}")
+
           SWIFT_STDLIB_DIR=""
-          for candidate in \
-            "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx" \
-            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"; do
+          for candidate in "${SEARCH_PATHS[@]}"; do
             if [ -f "$candidate/libswiftCore.dylib" ]; then
               SWIFT_STDLIB_DIR="$candidate"
               break
             fi
           done
           if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            SWIFT_LIB=$(find /Library/Developer/CommandLineTools /Applications -path '*/usr/lib/swift*/macosx/libswiftCore.dylib' 2>/dev/null | head -n 1)
-            if [ -n "$SWIFT_LIB" ]; then
-              SWIFT_STDLIB_DIR="$(dirname "$SWIFT_LIB")"
-            fi
-          fi
-          if [ -z "$SWIFT_STDLIB_DIR" ]; then
-            echo "Unable to locate libswiftCore.dylib" >&2
+            echo "swiftc target info did not yield a directory containing libswiftCore.dylib" >&2
+            printf 'candidate: %s\n' "${SEARCH_PATHS[@]}" >&2
             exit 1
           fi
-          TOOLCHAIN_SWIFT_DIR="$(cd "$SWIFT_STDLIB_DIR/.." && pwd)"
+
+          DYLD_SWIFT_PATHS="$(IFS=:; echo "${SEARCH_PATHS[*]}")"
+          SWIFT_RUSTFLAGS=""
+          for candidate in "${SEARCH_PATHS[@]}"; do
+            SWIFT_RUSTFLAGS="$SWIFT_RUSTFLAGS -C link-arg=-L$candidate -C link-arg=-Wl,-rpath,$candidate"
+          done
+
+          echo "Resolved SWIFT_TARGET=$SWIFT_TARGET"
           echo "Resolved SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR"
-          echo "Resolved TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR"
+          echo "Resolved SWIFT_RUNTIME_RESOURCE_DIR=$SWIFT_RUNTIME_RESOURCE_DIR"
+          printf 'Resolved Swift runtime search paths:\n'
+          printf '  %s\n' "${SEARCH_PATHS[@]}"
+          echo "SWIFT_TARGET=$SWIFT_TARGET" >> "$GITHUB_ENV"
           echo "SWIFT_STDLIB_DIR=$SWIFT_STDLIB_DIR" >> "$GITHUB_ENV"
-          echo "TOOLCHAIN_SWIFT_DIR=$TOOLCHAIN_SWIFT_DIR" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR:$TOOLCHAIN_SWIFT_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-L$TOOLCHAIN_SWIFT_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$TOOLCHAIN_SWIFT_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
+          echo "SWIFT_RUNTIME_RESOURCE_DIR=$SWIFT_RUNTIME_RESOURCE_DIR" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$DYLD_SWIFT_PATHS${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${SWIFT_RUSTFLAGS# } ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
