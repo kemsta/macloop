@@ -56,30 +56,30 @@ jobs:
               SEARCH_PATHS+=("$candidate")
             done < <(
               python - "$SWIFT_RUNTIME_RESOURCE_DIR" <<'PY'
-import pathlib, re, sys
-resource = pathlib.Path(sys.argv[1])
-parent = resource.parent
-candidates = []
-if parent.exists():
-    for child in parent.glob("swift*/macosx"):
-        if (child / "libswiftCore.dylib").exists():
-            candidates.append(child)
+              import pathlib, re, sys
+              resource = pathlib.Path(sys.argv[1])
+              parent = resource.parent
+              candidates = []
+              if parent.exists():
+                  for child in parent.glob("swift*/macosx"):
+                      if (child / "libswiftCore.dylib").exists():
+                          candidates.append(child)
 
-def version_key(path: pathlib.Path):
-    match = re.search(r"swift-(.+?)(?:/|$)", str(path))
-    if not match:
-        return ()
-    parts = []
-    for piece in re.split(r"[.-]", match.group(1)):
-        try:
-            parts.append((0, int(piece)))
-        except ValueError:
-            parts.append((1, piece))
-    return tuple(parts)
+              def version_key(path: pathlib.Path):
+                  match = re.search(r"swift-(.+?)(?:/|$)", str(path))
+                  if not match:
+                      return ()
+                  parts = []
+                  for piece in re.split(r"[.-]", match.group(1)):
+                      try:
+                          parts.append((0, int(piece)))
+                      except ValueError:
+                          parts.append((1, piece))
+                  return tuple(parts)
 
-for child in sorted(candidates, key=version_key, reverse=True):
-    print(child)
-PY
+              for child in sorted(candidates, key=version_key, reverse=True):
+                  print(child)
+              PY
             )
           fi
 
@@ -262,30 +262,30 @@ PY
               SEARCH_PATHS+=("$candidate")
             done < <(
               python - "$SWIFT_RUNTIME_RESOURCE_DIR" <<'PY'
-import pathlib, re, sys
-resource = pathlib.Path(sys.argv[1])
-parent = resource.parent
-candidates = []
-if parent.exists():
-    for child in parent.glob("swift*/macosx"):
-        if (child / "libswiftCore.dylib").exists():
-            candidates.append(child)
+              import pathlib, re, sys
+              resource = pathlib.Path(sys.argv[1])
+              parent = resource.parent
+              candidates = []
+              if parent.exists():
+                  for child in parent.glob("swift*/macosx"):
+                      if (child / "libswiftCore.dylib").exists():
+                          candidates.append(child)
 
-def version_key(path: pathlib.Path):
-    match = re.search(r"swift-(.+?)(?:/|$)", str(path))
-    if not match:
-        return ()
-    parts = []
-    for piece in re.split(r"[.-]", match.group(1)):
-        try:
-            parts.append((0, int(piece)))
-        except ValueError:
-            parts.append((1, piece))
-    return tuple(parts)
+              def version_key(path: pathlib.Path):
+                  match = re.search(r"swift-(.+?)(?:/|$)", str(path))
+                  if not match:
+                      return ()
+                  parts = []
+                  for piece in re.split(r"[.-]", match.group(1)):
+                      try:
+                          parts.append((0, int(piece)))
+                      except ValueError:
+                          parts.append((1, piece))
+                  return tuple(parts)
 
-for child in sorted(candidates, key=version_key, reverse=True):
-    print(child)
-PY
+              for child in sorted(candidates, key=version_key, reverse=True):
+                  print(child)
+              PY
             )
           fi
 
@@ -429,30 +429,30 @@ PY
               SEARCH_PATHS+=("$candidate")
             done < <(
               python - "$SWIFT_RUNTIME_RESOURCE_DIR" <<'PY'
-import pathlib, re, sys
-resource = pathlib.Path(sys.argv[1])
-parent = resource.parent
-candidates = []
-if parent.exists():
-    for child in parent.glob("swift*/macosx"):
-        if (child / "libswiftCore.dylib").exists():
-            candidates.append(child)
+              import pathlib, re, sys
+              resource = pathlib.Path(sys.argv[1])
+              parent = resource.parent
+              candidates = []
+              if parent.exists():
+                  for child in parent.glob("swift*/macosx"):
+                      if (child / "libswiftCore.dylib").exists():
+                          candidates.append(child)
 
-def version_key(path: pathlib.Path):
-    match = re.search(r"swift-(.+?)(?:/|$)", str(path))
-    if not match:
-        return ()
-    parts = []
-    for piece in re.split(r"[.-]", match.group(1)):
-        try:
-            parts.append((0, int(piece)))
-        except ValueError:
-            parts.append((1, piece))
-    return tuple(parts)
+              def version_key(path: pathlib.Path):
+                  match = re.search(r"swift-(.+?)(?:/|$)", str(path))
+                  if not match:
+                      return ()
+                  parts = []
+                  for piece in re.split(r"[.-]", match.group(1)):
+                      try:
+                          parts.append((0, int(piece)))
+                      except ValueError:
+                          parts.append((1, piece))
+                  return tuple(parts)
 
-for child in sorted(candidates, key=version_key, reverse=True):
-    print(child)
-PY
+              for child in sorted(candidates, key=version_key, reverse=True):
+                  print(child)
+              PY
             )
           fi
 
