@@ -252,10 +252,12 @@ def main() -> int:
                 if is_system_swift_install_name(install_name) and is_swift_dylib_install_name(install_name):
                     system_swift_basenames.add(pathlib.Path(install_name).name)
 
+        prefer_system_swift_runtime = bool(system_swift_basenames)
         if system_swift_basenames:
             print("System Swift dylibs already referenced by root binaries:")
             for basename in sorted(system_swift_basenames):
                 print(f"  /usr/lib/swift/{basename}")
+            print("Preferring system Swift runtime over wheel-local bundling to avoid duplicate runtime loading.")
 
         while queued:
             binary_path = queued.pop(0)
@@ -280,7 +282,7 @@ def main() -> int:
                     required_rpath_swift.add(basename)
 
                 system_install_name = f"/usr/lib/swift/{basename}"
-                if (must_bundle or uses_toolchain_swift) and basename in system_swift_basenames:
+                if (must_bundle or uses_toolchain_swift) and prefer_system_swift_runtime:
                     if install_name != system_install_name:
                         rewrite_dependency(binary_path, install_name, system_install_name)
                         modified_binaries.add(binary_path)
