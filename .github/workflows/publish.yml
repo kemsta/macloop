@@ -124,13 +124,13 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     env:
-      ARCHFLAGS: -arch x86_64 -arch arm64
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15]
         python-version: ["3.11"]
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
 
     steps:
       - uses: actions/checkout@v5
@@ -188,10 +188,10 @@ jobs:
           echo "DYLD_FALLBACK_LIBRARY_PATH=$SWIFT_STDLIB_DIR${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" >> "$GITHUB_ENV"
           echo "RUSTFLAGS=-C link-arg=-L$SWIFT_STDLIB_DIR -C link-arg=-Wl,-rpath,$SWIFT_STDLIB_DIR ${RUSTFLAGS:-}" >> "$GITHUB_ENV"
 
-      - name: Add Rust targets for universal2
-        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
 
-      - name: Build wheels
+      - name: Build wheel
         shell: bash
         run: |
           export PATH="$(dirname "$(rustup which cargo)"):$PATH"
@@ -203,16 +203,16 @@ jobs:
           cargo -vV
           which rustc
           rustc -vV
-          python -m maturin build --release --target universal2-apple-darwin --out dist
+          python -m maturin build --release --target ${{ matrix.target }} --out dist
 
       - name: Build sdist
-        if: matrix.os == 'macos-15'
+        if: matrix.os == 'macos-15' && matrix.target == 'aarch64-apple-darwin'
         run: python -m maturin sdist --out dist
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-${{ matrix.os }}-${{ matrix.target }}
           path: dist
 
   publish-testpypi:
