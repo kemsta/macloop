@@ -114,6 +114,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install maturin
+        run: python -m pip install 'maturin>=1.0,<2.0'
+
       - name: Patch Cargo.toml version from tag
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
@@ -136,17 +144,22 @@ jobs:
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          command: build
-          args: --release --target universal2-apple-darwin --out dist
+        shell: bash
+        run: |
+          export PATH="$(dirname "$(rustup which cargo)"):$PATH"
+          hash -r
+          test -f "$SWIFT_STDLIB_DIR/libswift_Concurrency.dylib"
+          which python
+          python --version
+          which cargo
+          cargo -vV
+          which rustc
+          rustc -vV
+          python -m maturin build --release --target universal2-apple-darwin --out dist
 
       - name: Build sdist
         if: matrix.os == 'macos-15'
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
+        run: python -m maturin sdist --out dist
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v5
