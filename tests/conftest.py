@@ -1,11 +1,48 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import types
 
 import numpy as np
 import pytest
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-medium",
+        action="store_true",
+        default=False,
+        help="run medium e2e tests that open real audio capture devices/apps/system capture",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "medium: medium e2e tests that require explicit opt-in and real macOS capture devices",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-medium"):
+        return
+
+    skip_medium = pytest.mark.skip(
+        reason="medium tests are disabled by default; pass --run-medium to enable",
+    )
+    for item in items:
+        if "medium" in item.keywords:
+            item.add_marker(skip_medium)
+
+
+@pytest.fixture
+def require_medium_run() -> None:
+    if os.environ.get("CI"):
+        pytest.skip("medium tests must not run in CI")
+    if not os.environ.get("PYTEST_RUN_MEDIUM"):
+        pytest.skip("set PYTEST_RUN_MEDIUM=1 for medium tests to confirm real-device execution")
 
 
 class _FakePipelineStats:

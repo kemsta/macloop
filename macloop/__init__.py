@@ -351,19 +351,31 @@ class AudioEngine:
         if self._closed:
             return
 
-        for sink_ref in list(self._sink_refs):
-            sink = sink_ref()
-            if sink is None:
-                continue
-            try:
-                sink.close()
-            except Exception:
-                pass
-
-        self._sink_refs.clear()
-        self._backend.close()
-        self._claimed_routes.clear()
         self._closed = True
+        backend_err: Optional[Exception] = None
+        sink_err: Optional[Exception] = None
+        try:
+            self._backend.close()
+        except Exception as exc:
+            backend_err = exc
+        finally:
+            for sink_ref in list(self._sink_refs):
+                sink = sink_ref()
+                if sink is None:
+                    continue
+                try:
+                    sink.close()
+                except Exception as exc:
+                    if sink_err is None:
+                        sink_err = exc
+
+            self._sink_refs.clear()
+            self._claimed_routes.clear()
+
+        if backend_err is not None:
+            raise backend_err
+        if sink_err is not None:
+            raise sink_err
 
     def __enter__(self) -> "AudioEngine":
         return self

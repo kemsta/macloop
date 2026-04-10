@@ -1,5 +1,9 @@
 name: Build And Publish
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   pull_request:
@@ -18,7 +22,6 @@ jobs:
     name: Run pytest
     runs-on: macos-15
     env:
-      RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
       UV_CACHE_DIR: .uv-cache
     steps:
       - uses: actions/checkout@v5
@@ -36,10 +39,13 @@ jobs:
           brew update
           brew install meson ninja pkg-config
 
+      - name: Resolve Swift runtime paths
+        run: python scripts/resolve_swift_runtime.py --github-env "$GITHUB_ENV"
+
       - name: Run tests
         run: |
-          uv sync --group dev
-          uv run --reinstall-package macloop pytest -q tests
+          bash scripts/ci_setup_test_env.sh
+          .venv/bin/pytest -q tests
 
       - name: Install Rust coverage tooling
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
@@ -50,7 +56,8 @@ jobs:
       - name: Generate Python coverage report
         if: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/') }}
         run: |
-          uv run --reinstall-package macloop pytest \
+          bash scripts/ci_setup_test_env.sh
+          .venv/bin/pytest \
             --cov=macloop \
             --cov-report=xml:python-coverage.xml \
             --cov-report=term-missing \
@@ -66,8 +73,8 @@ jobs:
           export CARGO_TARGET_DIR="${CARGO_LLVM_COV_TARGET_DIR:-target/llvm-cov-target}"
           export RUSTFLAGS="$RUSTFLAGS $SWIFT_RUSTFLAGS"
           cargo llvm-cov --workspace --no-report
-          uv run maturin develop --manifest-path python_ffi/Cargo.toml
-          uv run pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
+          bash scripts/ci_setup_test_env.sh
+          .venv/bin/pytest -q tests/test_e2e_synthetic.py tests/test_ffi_backend.py
           cargo llvm-cov report --lcov --output-path rust-lcov.info
 
       - name: Upload coverage to Codecov
@@ -95,17 +102,28 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     env:
-      RUSTFLAGS: -C link-arg=-L/usr/lib/swift -C link-arg=-Wl,-rpath,/usr/lib/swift
-      ARCHFLAGS: -arch x86_64 -arch arm64
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15]
-        python-version: ["3.11"]
+        include:
+          - os: macos-15
+            python-version: "3.11"
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            python-version: "3.11"
+            target: x86_64-apple-darwin
 
     steps:
       - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install maturin
+        run: python -m pip install 'maturin>=1.0,<2.0'
 
       - name: Patch Cargo.toml version from tag
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}
@@ -125,26 +143,40 @@ jobs:
           brew update
           brew install meson ninja pkg-config
 
-      - name: Add Rust targets for universal2
-        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Resolve Swift runtime paths
+        run: |
+          python scripts/resolve_swift_runtime.py \
+            --rust-target "${{ matrix.target }}" \
+            --deployment-target "$MACOSX_DEPLOYMENT_TARGET" \
+            --github-env "$GITHUB_ENV"
 
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          command: build
-          args: --release --target universal2-apple-darwin --out dist
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build and repair wheel
+        shell: bash
+        run: |
+          # Swift dylib bundling is handled by scripts/repair_swift_wheel.py, not maturin repair.
+          bash scripts/ci_build_and_repair_wheel.sh \
+            "${{ matrix.target }}" \
+            dist \
+            "$MACOSX_DEPLOYMENT_TARGET"
+
+      - name: Smoke test repaired wheel
+        shell: bash
+        run: |
+          WHEEL=$(find dist -name '*.whl' | head -n 1)
+          test -n "$WHEEL"
+          bash scripts/ci_smoke_test_wheel.sh "$WHEEL"
 
       - name: Build sdist
-        if: matrix.os == 'macos-15'
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
+        if: matrix.os == 'macos-15' && matrix.target == 'aarch64-apple-darwin'
+        run: python -m maturin sdist --out dist
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-${{ matrix.os }}-${{ matrix.target }}
           path: dist
 
   publish-testpypi:

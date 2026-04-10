@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import queue
 import struct
+import subprocess
+import sys
+import textwrap
 import threading
 from pathlib import Path
 
@@ -242,3 +246,80 @@ def test_two_synthetic_sources_mix_into_aligned_wav(tmp_path: Path) -> None:
     # should stay aligned at (1.0 + 3.0) * 0.5 == 2.0 rather than stretching in time.
     assert len(wav_samples) == 48
     assert wav_samples == [2.0] * 48
+
+
+def test_hot_synthetic_engine_close_completes_with_wav_and_asr_sinks(tmp_path: Path) -> None:
+    child_code = textwrap.dedent(
+        """
+        import json
+        import sys
+        import time
+        from pathlib import Path
+
+        import macloop
+
+        base = Path(sys.argv[1])
+        wav_path = base / "hot.wav"
+        engine = macloop.AudioEngine()
+        stream = engine.create_stream(
+            macloop.SyntheticSource,
+            frames_per_callback=160,
+            callback_count=1_000_000,
+            start_value=0.1,
+            step_value=0.0,
+            interval_ms=0,
+            start_delay_ms=0,
+        )
+        route_wav = engine.route("hot_wav", stream=stream)
+        route_asr = engine.route("hot_asr", stream=stream)
+        wav_sink = macloop.WavSink(route=route_wav, file=wav_path)
+        asr_sink = macloop.AsrSink(
+            routes=[route_asr],
+            chunk_frames=320,
+            sample_rate=16_000,
+            channels=1,
+            sample_format="f32",
+        )
+
+        time.sleep(0.05)
+        started = time.monotonic()
+        engine.close()
+        elapsed = time.monotonic() - started
+        print(
+            json.dumps(
+                {
+                    "close_elapsed_s": round(elapsed, 6),
+                    "wav_exists": wav_path.exists(),
+                    "wav_size": wav_path.stat().st_size if wav_path.exists() else 0,
+                    "asr_closed": asr_sink._closed,
+                    "wav_closed": wav_sink._closed,
+                }
+            ),
+            flush=True,
+        )
+        """
+    )
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", child_code, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=6.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            "engine.close() hung for hot SyntheticSource with WavSink + AsrSink; "
+            f"stdout={((exc.stdout or '')[:400])!r} stderr={((exc.stderr or '')[:400])!r}"
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = completed.stdout.strip()
+    assert payload, completed.stderr
+    stats = json.loads(payload)
+    assert stats["close_elapsed_s"] < 6.0
+    assert stats["wav_exists"] is True
+    assert stats["wav_size"] > 44
+    assert stats["asr_closed"] is True
+    assert stats["wav_closed"] is True
