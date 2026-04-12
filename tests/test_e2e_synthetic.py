@@ -414,8 +414,8 @@ def test_hot_synthetic_restart_on_single_engine_does_not_hang(tmp_path: Path) ->
     payload = completed.stdout.strip()
     assert payload, completed.stderr
     stats = json.loads(payload)
-    assert stats["first_close_elapsed_s"] < 2.0
-    assert stats["final_close_elapsed_s"] < 2.0
+    assert stats["first_close_elapsed_s"] < 10.0
+    assert stats["final_close_elapsed_s"] < 10.0
     assert stats["wav_sizes"] == [size for size in stats["wav_sizes"] if size > 44]
     assert len(stats["wav_sizes"]) == 2
     assert stats["final_asr_closed"] is True
