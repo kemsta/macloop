@@ -9,7 +9,7 @@ use core_engine::{
     WavSinkMetricsSnapshot,
 };
 use numpy::ToPyArray;
-use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList, PyModule};
 use stats::{
@@ -30,7 +30,8 @@ const DEFAULT_GARBAGE_CAPACITY: usize = 32;
 const DEFAULT_ROUTE_CAPACITY: usize = 4096;
 const DEFAULT_MAX_PROCESSORS: usize = 32;
 const DEFAULT_MAX_OUTPUTS: usize = 16;
-const SCREEN_CAPTURE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const NATIVE_SOURCE_START_TIMEOUT: Duration = Duration::from_secs(10);
+const NATIVE_SOURCE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct GainProcessorNode {
@@ -95,6 +96,7 @@ impl<T> PendingCleanup<T> {
 
 enum PendingRuntimeCleanup {
     AppAudio(PendingCleanup<AppAudioSource>),
+    Microphone(PendingCleanup<MicrophoneSource>),
     SystemAudio(PendingCleanup<SystemAudioSource>),
 }
 
@@ -194,16 +196,24 @@ enum StopStreamRuntimeError {
     },
 }
 
+fn runtime_stop_priority(runtime: &StreamRuntime) -> u8 {
+    match runtime {
+        StreamRuntime::Microphone(_) => 0,
+        StreamRuntime::AppAudio(_) | StreamRuntime::SystemAudio(_) => 1,
+        StreamRuntime::Synthetic(_) => 2,
+    }
+}
+
 fn remaining_deadline(deadline: Instant) -> Option<Duration> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
 }
 
-fn startup_timeout_message(action: &str, label: &str) -> String {
+fn lifecycle_timeout_message(action: &str, label: &str, timeout: Duration) -> String {
     format!(
-        "timed out {action} {label} before the {}s startup deadline elapsed",
-        SCREEN_CAPTURE_START_TIMEOUT.as_secs()
+        "timed out {action} {label} before the {}s lifecycle deadline elapsed",
+        timeout.as_secs()
     )
 }
 
@@ -247,7 +257,7 @@ where
         return Err(TimedSourceStartError::Fatal {
             source: Some(source),
             cleanup: None,
-            message: startup_timeout_message("starting", label),
+            message: lifecycle_timeout_message("starting", label, NATIVE_SOURCE_START_TIMEOUT),
         });
     };
 
@@ -281,7 +291,7 @@ where
                 completion,
                 ready,
             }),
-            message: startup_timeout_message("starting", label),
+            message: lifecycle_timeout_message("starting", label, NATIVE_SOURCE_START_TIMEOUT),
         }),
         Err(RecvTimeoutError::Disconnected) => match take_deferred_source_result(&completion) {
             Some(Ok(source)) => Ok(source),
@@ -361,6 +371,13 @@ impl PendingRuntimeCleanup {
                 AppAudioSource::stop,
                 PendingRuntimeCleanup::AppAudio,
             ),
+            Self::Microphone(handle) => progress_pending_cleanup(
+                handle,
+                "microphone source",
+                deadline,
+                MicrophoneSource::stop,
+                PendingRuntimeCleanup::Microphone,
+            ),
             Self::SystemAudio(handle) => progress_pending_cleanup(
                 handle,
                 "system audio source",
@@ -377,10 +394,13 @@ fn pending_cleanup_from_ready_runtime(runtime: StreamRuntime) -> Option<PendingR
         StreamRuntime::AppAudio(source) => Some(PendingRuntimeCleanup::AppAudio(
             PendingCleanup::ready_to_stop(Ok(source)),
         )),
+        StreamRuntime::Microphone(source) => Some(PendingRuntimeCleanup::Microphone(
+            PendingCleanup::ready_to_stop(Ok(source)),
+        )),
         StreamRuntime::SystemAudio(source) => Some(PendingRuntimeCleanup::SystemAudio(
             PendingCleanup::ready_to_stop(Ok(source)),
         )),
-        StreamRuntime::Microphone(_) | StreamRuntime::Synthetic(_) => None,
+        StreamRuntime::Synthetic(_) => None,
     }
 }
 
@@ -404,8 +424,8 @@ fn cleanup_pending_cleanups_with_deadline(
             PendingRuntimeCleanupProgress::Pending(cleanup) => {
                 if first_error.is_none() {
                     first_error = Some(format!(
-                        "timed out waiting for cleanup of stream '{stream_id}' before the {}s startup deadline elapsed",
-                        SCREEN_CAPTURE_START_TIMEOUT.as_secs()
+                        "timed out waiting for cleanup of stream '{stream_id}' before the {}s lifecycle deadline elapsed",
+                        NATIVE_SOURCE_STOP_TIMEOUT.as_secs()
                     ));
                 }
                 remaining.insert(stream_id, cleanup);
@@ -489,17 +509,36 @@ fn start_stream_state_with_deadline(
                 message,
             }),
         },
-        StreamRuntime::Microphone(mut source) => match source.start() {
-            Ok(()) => Ok(StreamRuntimeState {
+        StreamRuntime::Microphone(source) => match start_native_source_with_deadline(
+            source,
+            "microphone source",
+            deadline,
+            MicrophoneSource::start,
+        ) {
+            Ok(source) => Ok(StreamRuntimeState {
                 runtime: StreamRuntime::Microphone(source),
                 started: true,
             }),
-            Err(message) => Err(StartStreamStateError::Recoverable {
-                state: StreamRuntimeState {
+            Err(TimedSourceStartError::Recoverable { source, message }) => {
+                Err(StartStreamStateError::Recoverable {
+                    state: StreamRuntimeState {
+                        runtime: StreamRuntime::Microphone(source),
+                        started: false,
+                    },
+                    message,
+                })
+            }
+            Err(TimedSourceStartError::Fatal {
+                source,
+                cleanup,
+                message,
+            }) => Err(StartStreamStateError::Fatal {
+                state: source.map(|source| StreamRuntimeState {
                     runtime: StreamRuntime::Microphone(source),
                     started: false,
-                },
-                message: message.to_string(),
+                }),
+                cleanup: cleanup.map(PendingRuntimeCleanup::Microphone),
+                message,
             }),
         },
         StreamRuntime::Synthetic(mut source) => match source.start() {
@@ -533,7 +572,7 @@ where
         return Err(TimedSourceStopError::Fatal {
             source: Some(source),
             cleanup: None,
-            message: startup_timeout_message("stopping", label),
+            message: lifecycle_timeout_message("stopping", label, NATIVE_SOURCE_STOP_TIMEOUT),
         });
     };
 
@@ -568,7 +607,7 @@ where
                 completion,
                 ready,
             }),
-            message: startup_timeout_message("stopping", label),
+            message: lifecycle_timeout_message("stopping", label, NATIVE_SOURCE_STOP_TIMEOUT),
         }),
         Err(RecvTimeoutError::Disconnected) => match take_deferred_source_result(&completion) {
             Some(Ok(source)) => Ok(source),
@@ -635,11 +674,27 @@ fn stop_stream_runtime_with_deadline(
                 message,
             }),
         },
-        StreamRuntime::Microphone(mut source) => match source.stop() {
-            Ok(()) => Ok(StreamRuntime::Microphone(source)),
-            Err(message) => Err(StopStreamRuntimeError::Recoverable {
-                runtime: StreamRuntime::Microphone(source),
-                message: message.to_string(),
+        StreamRuntime::Microphone(source) => match stop_native_source_with_deadline(
+            source,
+            "microphone source",
+            deadline,
+            MicrophoneSource::stop,
+        ) {
+            Ok(source) => Ok(StreamRuntime::Microphone(source)),
+            Err(TimedSourceStopError::Recoverable { source, message }) => {
+                Err(StopStreamRuntimeError::Recoverable {
+                    runtime: StreamRuntime::Microphone(source),
+                    message,
+                })
+            }
+            Err(TimedSourceStopError::Fatal {
+                source,
+                cleanup,
+                message,
+            }) => Err(StopStreamRuntimeError::Fatal {
+                runtime: source.map(StreamRuntime::Microphone),
+                cleanup: cleanup.map(PendingRuntimeCleanup::Microphone),
+                message,
             }),
         },
         StreamRuntime::Synthetic(mut source) => match source.stop() {
@@ -1298,7 +1353,7 @@ impl PyAudioEngineBackend {
         let was_poisoned = self.poisoned.is_some();
         let (stop_result, remaining_cleanups) = py.detach(move || {
             let mut first_error: Option<String> = None;
-            let deadline = Instant::now() + SCREEN_CAPTURE_START_TIMEOUT;
+            let deadline = Instant::now() + NATIVE_SOURCE_STOP_TIMEOUT;
 
             let (mut remaining_cleanups, cleanup_error) =
                 cleanup_pending_cleanups_with_deadline(pending_cleanups, deadline);
@@ -1306,7 +1361,10 @@ impl PyAudioEngineBackend {
                 first_error = Some(err);
             }
 
-            for (stream_id, source) in sources {
+            let mut source_entries = sources.into_iter().collect::<Vec<_>>();
+            source_entries.sort_by_key(|(_, source)| runtime_stop_priority(&source.runtime));
+
+            for (stream_id, source) in source_entries {
                 if !source.started {
                     continue;
                 }
@@ -1359,12 +1417,22 @@ impl PyAudioEngineBackend {
         if was_poisoned {
             Ok(())
         } else {
-            stop_result.map_err(PyRuntimeError::new_err)
+            stop_result.map_err(|message| {
+                if Self::lifecycle_timeout_error(&message) {
+                    PyTimeoutError::new_err(message)
+                } else {
+                    PyRuntimeError::new_err(message)
+                }
+            })
         }
     }
 }
 
 impl PyAudioEngineBackend {
+    fn lifecycle_timeout_error(message: &str) -> bool {
+        message.contains("timed out") && message.contains("lifecycle deadline")
+    }
+
     fn rollback_failed_stream_creation(&mut self, stream_id: &str, err: PyErr) -> PyErr {
         match self.controller.remove_stream(&stream_id.to_string()) {
             Ok(()) => err,
@@ -1503,7 +1571,7 @@ impl PyAudioEngineBackend {
         let stream_ids = self.stream_ids_for_routes(&route_ids)?;
         let stream_states = self.take_stream_states(&stream_ids)?;
         let started_states = match py.detach(move || {
-            start_stream_states_with_timeout(stream_states, SCREEN_CAPTURE_START_TIMEOUT)
+            start_stream_states_with_timeout(stream_states, NATIVE_SOURCE_START_TIMEOUT)
         }) {
             Ok(states) => states,
             Err(StartStreamsError {
@@ -1580,7 +1648,7 @@ impl PyAudioEngineBackend {
         let stream_ids = self.stream_ids_for_routes(&route_ids)?;
         let stream_states = self.take_stream_states(&stream_ids)?;
         let started_states = match py.detach(move || {
-            start_stream_states_with_timeout(stream_states, SCREEN_CAPTURE_START_TIMEOUT)
+            start_stream_states_with_timeout(stream_states, NATIVE_SOURCE_START_TIMEOUT)
         }) {
             Ok(states) => states,
             Err(StartStreamsError {

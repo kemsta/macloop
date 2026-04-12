@@ -200,6 +200,26 @@ def test_audio_engine_close_propagates_backend_error_after_sink_cleanup(macloop_
     assert sink.closed is True
 
 
+def test_audio_engine_close_suppresses_backend_timeout_after_sink_cleanup(macloop_module) -> None:
+    class TrackingSink:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    engine = macloop_module.AudioEngine()
+    sink = TrackingSink()
+    engine._register_sink(sink)
+    engine._backend.close = lambda: (_ for _ in ()).throw(TimeoutError("native close timed out"))
+
+    engine.close()
+
+    assert sink.closed is True
+    with pytest.raises(RuntimeError, match="audio engine is closed"):
+        engine.stats()
+
+
 def test_asr_sink_close_releases_routes_on_backend_error(macloop_module) -> None:
     with macloop_module.AudioEngine() as engine:
         stream = engine.create_stream(macloop_module.MicrophoneSource)
