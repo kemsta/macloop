@@ -134,11 +134,7 @@ impl WavFileOutput {
                 let stopping = stop_thread.load(Ordering::Relaxed);
                 let mut drained_any = false;
                 for (consumer, buffer) in consumers.iter_mut().zip(input_buffers.iter_mut()) {
-                    let drain_limit = if stopping {
-                        consumer.occupied_len() / frame_channels * frame_channels
-                    } else {
-                        usize::MAX
-                    };
+                    let drain_limit = consumer.occupied_len() / frame_channels * frame_channels;
                     let mut drained = 0_usize;
                     while drained < drain_limit {
                         let Some(sample) = consumer.try_pop() else {
