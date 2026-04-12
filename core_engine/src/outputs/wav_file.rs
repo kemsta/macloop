@@ -539,8 +539,7 @@ mod tests {
         .expect("spawn wav");
 
         wav.stop().expect("first stop");
-        let err = wav.stop().expect_err("second stop should fail");
-        assert!(matches!(err, WavOutputError::AlreadyStopped));
+        assert!(matches!(wav.stop(), Err(WavOutputError::AlreadyStopped)));
     }
 
     #[test]

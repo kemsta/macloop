@@ -683,8 +683,7 @@ mod tests {
         .expect("spawn sink");
 
         sink.stop().expect("first stop");
-        let err = sink.stop().expect_err("second stop should fail");
-        assert!(matches!(err, AsrSinkError::AlreadyStopped));
+        assert!(matches!(sink.stop(), Err(AsrSinkError::AlreadyStopped)));
     }
 
     #[test]
