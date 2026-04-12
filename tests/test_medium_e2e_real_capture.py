@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import math
 import queue
 import shutil
 import struct
 import subprocess
+import sys
+import textwrap
 import threading
 import time
 import wave
@@ -30,6 +33,7 @@ pytestmark = [
 ]
 
 _CLOSE_TIMEOUT_S = 5.0
+_REAL_SOURCE_RERUN_TIMEOUT_S = 12.0
 _PLAYBACK_DURATION_S = 3.0
 _EXPECTED_TONE_HZ = 440.0
 
@@ -311,4 +315,103 @@ def test_medium_system_audio_engine_close_remains_stable_across_repeated_runs(
         _assert_finalized_wav(output_path)
 
     assert len(elapsed_values) == 3
+    assert max(elapsed_values) < _CLOSE_TIMEOUT_S
+
+
+def test_medium_real_source_asr_rerun_engine_close_remains_stable(tmp_path: Path) -> None:
+    probe = textwrap.dedent(
+        """
+        import asyncio
+        import json
+        import time
+
+        import macloop
+
+        async def run() -> None:
+            stats = []
+            for cycle in range(2):
+                engine = macloop.AudioEngine()
+                try:
+                    remote = engine.create_stream(macloop.SystemAudioSource)
+                    mic = engine.create_stream(macloop.MicrophoneSource, vpio_enabled=True)
+                    routes = [
+                        engine.route(id=f"remote_{cycle}", stream=remote),
+                        engine.route(id=f"mic_{cycle}", stream=mic),
+                    ]
+
+                    for sink_cycle in range(2):
+                        sink = macloop.AsrSink(
+                            routes=routes,
+                            chunk_frames=1280,
+                            sample_rate=16000,
+                            channels=1,
+                            sample_format="i16",
+                        )
+
+                        async def reader() -> None:
+                            async for _ in sink.chunks_async():
+                                pass
+
+                        task = asyncio.create_task(reader())
+                        await asyncio.sleep(1.5)
+                        sink.close()
+                        await task
+                        await asyncio.sleep(0.25)
+
+                    started = time.monotonic()
+                    engine.close()
+                    stats.append(
+                        {
+                            "cycle": cycle,
+                            "engine_close_elapsed_s": round(time.monotonic() - started, 6),
+                        }
+                    )
+                finally:
+                    try:
+                        engine.close()
+                    except Exception:
+                        pass
+
+            print(json.dumps(stats), flush=True)
+
+        asyncio.run(run())
+        """
+    )
+
+    elapsed_values: list[float] = []
+    for run_index in range(2):
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", probe],
+                capture_output=True,
+                text=True,
+                timeout=_REAL_SOURCE_RERUN_TIMEOUT_S,
+                cwd=tmp_path,
+            )
+        except subprocess.TimeoutExpired as exc:
+            pytest.fail(
+                f"real-source rerun probe timed out on run {run_index + 1} after "
+                f"{_REAL_SOURCE_RERUN_TIMEOUT_S:.1f}s\nSTDOUT:\n{exc.stdout or ''}\nSTDERR:\n{exc.stderr or ''}"
+            )
+
+        assert completed.returncode == 0, (
+            f"real-source rerun probe failed on run {run_index + 1} with return code "
+            f"{completed.returncode}\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+        )
+
+        payload = completed.stdout.strip().splitlines()
+        assert payload, (
+            f"real-source rerun probe produced no JSON payload on run {run_index + 1}\n"
+            f"STDERR:\n{completed.stderr}"
+        )
+        stats = json.loads(payload[-1])
+        assert len(stats) == 2
+        close_times = [float(item["engine_close_elapsed_s"]) for item in stats]
+        elapsed_values.extend(close_times)
+        assert max(close_times) < _CLOSE_TIMEOUT_S, (
+            f"real-source rerun probe observed slow engine.close() on run {run_index + 1}: "
+            f"{close_times}\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+        )
+
+    assert len(elapsed_values) == 4
     assert max(elapsed_values) < _CLOSE_TIMEOUT_S
