@@ -375,6 +375,8 @@ class AudioEngine:
         sink_err: Optional[Exception] = None
         try:
             self._backend.close()
+        except TimeoutError:
+            backend_err = None
         except Exception as exc:
             backend_err = exc
         finally:
