@@ -91,7 +91,7 @@ pub struct WavSinkMetricsSnapshot {
 
 pub struct WavFileOutput {
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<Result<(), WavOutputError>>>,
+    handle: Option<JoinHandle<Result<Vec<RouteConsumer>, WavOutputError>>>,
     metrics: Arc<WavSinkMetrics>,
 }
 
@@ -123,7 +123,7 @@ impl WavFileOutput {
         let channels = format.channels.max(1) as u64;
         let frame_channels = format.channels.max(1) as usize;
 
-        let handle = thread::spawn(move || -> Result<(), WavOutputError> {
+        let handle = thread::spawn(move || -> Result<Vec<RouteConsumer>, WavOutputError> {
             let mut writer = hound::WavWriter::new(writer, spec)?;
             let idle_sleep = Duration::from_micros(200);
             let mut consumers = consumers;
@@ -207,7 +207,7 @@ impl WavFileOutput {
             metrics_thread
                 .finalize
                 .record(duration_to_u32_us(finalize_start.elapsed()));
-            Ok(())
+            Ok(consumers)
         });
 
         Ok(Self {
@@ -305,7 +305,7 @@ impl WavFileOutput {
         self.metrics.snapshot()
     }
 
-    pub fn stop(&mut self) -> Result<(), WavOutputError> {
+    pub fn stop(&mut self) -> Result<Vec<RouteConsumer>, WavOutputError> {
         self.stop.store(true, Ordering::Relaxed);
         let Some(handle) = self.handle.take() else {
             return Err(WavOutputError::AlreadyStopped);
@@ -539,8 +539,7 @@ mod tests {
         .expect("spawn wav");
 
         wav.stop().expect("first stop");
-        let err = wav.stop().expect_err("second stop should fail");
-        assert!(matches!(err, WavOutputError::AlreadyStopped));
+        assert!(matches!(wav.stop(), Err(WavOutputError::AlreadyStopped)));
     }
 
     #[test]

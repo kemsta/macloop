@@ -68,6 +68,25 @@ def _raise_on_unexpected_kwargs(name: str, kwargs: dict[str, Any]) -> None:
     raise TypeError(f"{name} got unexpected keyword arguments: {unexpected}")
 
 
+def _close_backend_with_optional_engine(backend: Any, engine_backend: Any | None) -> None:
+    if engine_backend is not None:
+        try:
+            backend.close(engine_backend)
+            return
+        except TypeError as exc:
+            try:
+                backend.close()
+                return
+            except TypeError:
+                raise exc
+
+    close_no_restore = getattr(backend, "close_no_restore", None)
+    if close_no_restore is not None:
+        close_no_restore()
+    else:
+        backend.close()
+
+
 @dataclass(frozen=True, slots=True)
 class AudioChunk:
     route_id: str
@@ -506,13 +525,16 @@ class AsrSink:
             return
 
         err: Optional[Exception] = None
+        engine = self._engine_ref()
         try:
-            self._backend.close()
+            _close_backend_with_optional_engine(
+                self._backend,
+                engine._backend if engine is not None else None,
+            )
         except Exception as exc:
             err = exc
         finally:
             self._closed = True
-            engine = self._engine_ref()
             if engine is not None:
                 engine._release_routes(self._route_ids)
             _drop_oldest_put(self._queue, _STOP)
@@ -634,13 +656,16 @@ class WavSink:
             return
 
         err: Optional[Exception] = None
+        engine = self._engine_ref()
         try:
-            self._backend.close()
+            _close_backend_with_optional_engine(
+                self._backend,
+                engine._backend if engine is not None else None,
+            )
         except Exception as exc:
             err = exc
         finally:
             self._closed = True
-            engine = self._engine_ref()
             if engine is not None:
                 engine._release_routes(self._route_ids)
 

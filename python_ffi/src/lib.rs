@@ -904,7 +904,12 @@ impl PyAsrSinkBackend {
         Ok(out)
     }
 
-    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (engine=None))]
+    fn close(
+        &mut self,
+        py: Python<'_>,
+        mut engine: Option<PyRefMut<'_, PyAudioEngineBackend>>,
+    ) -> PyResult<()> {
         let Some(mut sink) = self.sink.take() else {
             return Ok(());
         };
@@ -915,15 +920,41 @@ impl PyAsrSinkBackend {
             (stop_result, final_stats)
         });
         self.final_stats = Some(final_stats);
-        stop_result
+        let route_consumers = stop_result
             .map_err(|e| PyRuntimeError::new_err(format!("failed to stop asr sink: {e}")))?;
+
+        if let Some(engine) = engine.as_mut() {
+            engine
+                .restore_route_consumers(
+                    route_consumers
+                        .into_iter()
+                        .map(|input| (input.input_id, input.consumer))
+                        .collect(),
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("failed to restore asr sink routes: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn close_no_restore(&mut self, py: Python<'_>) -> PyResult<()> {
+        let Some(mut sink) = self.sink.take() else {
+            return Ok(());
+        };
+
+        let (stop_result, final_stats) = py.detach(move || {
+            let stop_result = sink.stop().map_err(|e| e.to_string());
+            let final_stats = sink.stats();
+            (stop_result, final_stats)
+        });
+        self.final_stats = Some(final_stats);
+        let _ = stop_result;
         Ok(())
     }
 }
 
 impl Drop for PyAsrSinkBackend {
     fn drop(&mut self) {
-        let _ = Python::try_attach(|py| self.close(py));
+        let _ = Python::try_attach(|py| self.close_no_restore(py));
     }
 }
 
@@ -931,6 +962,7 @@ impl Drop for PyAsrSinkBackend {
 struct PyWavSinkBackend {
     sink: Option<WavFileOutput>,
     final_stats: Option<WavSinkMetricsSnapshot>,
+    route_ids: Vec<String>,
 }
 
 #[pymethods]
@@ -944,7 +976,35 @@ impl PyWavSinkBackend {
         Py::new(py, PyWavSinkStats::from_snapshot(py, snapshot)?)
     }
 
-    fn close(&mut self, py: Python<'_>) -> PyResult<()> {
+    #[pyo3(signature = (engine=None))]
+    fn close(
+        &mut self,
+        py: Python<'_>,
+        mut engine: Option<PyRefMut<'_, PyAudioEngineBackend>>,
+    ) -> PyResult<()> {
+        let Some(mut sink) = self.sink.take() else {
+            return Ok(());
+        };
+        let route_ids = self.route_ids.clone();
+
+        let (stop_result, final_stats) = py.detach(move || {
+            let stop_result = sink.stop().map_err(|e| e.to_string());
+            let final_stats = sink.stats();
+            (stop_result, final_stats)
+        });
+        self.final_stats = Some(final_stats);
+        let consumers = stop_result
+            .map_err(|e| PyRuntimeError::new_err(format!("failed to stop wav sink: {e}")))?;
+
+        if let Some(engine) = engine.as_mut() {
+            engine
+                .restore_route_consumers(route_ids.into_iter().zip(consumers).collect())
+                .map_err(|e| PyRuntimeError::new_err(format!("failed to restore wav sink routes: {e}")))?;
+        }
+        Ok(())
+    }
+
+    fn close_no_restore(&mut self, py: Python<'_>) -> PyResult<()> {
         let Some(mut sink) = self.sink.take() else {
             return Ok(());
         };
@@ -955,15 +1015,14 @@ impl PyWavSinkBackend {
             (stop_result, final_stats)
         });
         self.final_stats = Some(final_stats);
-        stop_result
-            .map_err(|e| PyRuntimeError::new_err(format!("failed to stop wav sink: {e}")))?;
+        let _ = stop_result;
         Ok(())
     }
 }
 
 impl Drop for PyWavSinkBackend {
     fn drop(&mut self) {
-        let _ = Python::try_attach(|py| self.close(py));
+        let _ = Python::try_attach(|py| self.close_no_restore(py));
     }
 }
 
@@ -1539,6 +1598,7 @@ impl PyAudioEngineBackend {
         self.restore_stream_states(started_states);
 
         let route_consumers = self.take_route_consumers(&route_ids)?;
+        let route_ids_for_sink = route_ids.clone();
         let master_format = self.controller.master_format();
         let detached_result: DetachedWavStartResult = py.detach(move || {
             let consumers = route_consumers
@@ -1559,6 +1619,7 @@ impl PyAudioEngineBackend {
             Ok(sink) => Ok(PyWavSinkBackend {
                 sink: Some(sink),
                 final_stats: None,
+                route_ids: route_ids_for_sink,
             }),
             Err((err, route_consumers)) => {
                 if let Err(restore_err) = self.restore_route_consumers(route_consumers) {

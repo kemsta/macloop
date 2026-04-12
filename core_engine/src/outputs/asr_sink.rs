@@ -178,13 +178,18 @@ impl InputState {
     }
 
     fn poll(&mut self, callback: &mut dyn AsrSinkCallback) -> Result<bool, AsrSinkError> {
-        self.poll_with_limit(callback, None)
-    }
-
-    fn poll_stop(&mut self, callback: &mut dyn AsrSinkCallback) -> Result<bool, AsrSinkError> {
         let channels = MASTER_FORMAT.channels.max(1) as usize;
         let bounded_samples = self.consumer.occupied_len() / channels * channels;
         self.poll_with_limit(callback, Some(bounded_samples))
+    }
+
+    fn stop_now(&mut self) {
+        self.drained_master.clear();
+        self.converted_output.clear();
+        self.pending_output.clear();
+        self.pending_offset = 0;
+        self.quantized_output.clear();
+        self.metrics.pending_frames.store(0, Ordering::Relaxed);
     }
 
     fn poll_with_limit(
@@ -323,7 +328,7 @@ impl AsrSinkMetrics {
 
 pub struct AsrSink {
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<Result<(), AsrSinkError>>>,
+    handle: Option<JoinHandle<Result<Vec<AsrSinkInput>, AsrSinkError>>>,
     metrics: Arc<AsrSinkMetrics>,
 }
 
@@ -387,13 +392,13 @@ impl AsrSink {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
 
-        let handle = thread::spawn(move || -> Result<(), AsrSinkError> {
+        let handle = thread::spawn(move || -> Result<Vec<AsrSinkInput>, AsrSinkError> {
             let idle_sleep = Duration::from_micros(200);
 
             loop {
                 if stop_thread.load(Ordering::Relaxed) {
                     for state in &mut states {
-                        let _ = state.poll_stop(&mut *callback)?;
+                        state.stop_now();
                     }
                     break;
                 }
@@ -408,7 +413,13 @@ impl AsrSink {
                 }
             }
 
-            Ok(())
+            Ok(states
+                .into_iter()
+                .map(|state| AsrSinkInput {
+                    input_id: state.input_id,
+                    consumer: state.consumer,
+                })
+                .collect())
         });
 
         Ok(Self {
@@ -430,7 +441,7 @@ impl AsrSink {
         self.metrics.snapshot()
     }
 
-    pub fn stop(&mut self) -> Result<(), AsrSinkError> {
+    pub fn stop(&mut self) -> Result<Vec<AsrSinkInput>, AsrSinkError> {
         self.stop.store(true, Ordering::Relaxed);
         let Some(handle) = self.handle.take() else {
             return Err(AsrSinkError::AlreadyStopped);
@@ -672,8 +683,7 @@ mod tests {
         .expect("spawn sink");
 
         sink.stop().expect("first stop");
-        let err = sink.stop().expect_err("second stop should fail");
-        assert!(matches!(err, AsrSinkError::AlreadyStopped));
+        assert!(matches!(sink.stop(), Err(AsrSinkError::AlreadyStopped)));
     }
 
     #[test]

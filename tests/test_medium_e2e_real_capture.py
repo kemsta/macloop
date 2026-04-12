@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import queue
 import shutil
 import struct
 import subprocess
@@ -90,10 +91,25 @@ def _read_float_wav(path: Path) -> tuple[tuple[int, int, int], list[float]]:
 
 def _invoke_with_timeout(fn: Callable[[], None], *, timeout_s: float, label: str) -> float:
     started_at = time.monotonic()
-    fn()
+    errors: queue.Queue[BaseException] = queue.Queue()
+
+    def runner() -> None:
+        try:
+            fn()
+        except BaseException as exc:  # pragma: no cover - exercised via callers
+            errors.put(exc)
+
+    thread = threading.Thread(target=runner, name=f"timeout:{label}", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+
     elapsed = time.monotonic() - started_at
-    if elapsed > timeout_s:
-        pytest.fail(f"{label} exceeded {timeout_s:.1f}s (took {elapsed:.3f}s)")
+    if thread.is_alive():
+        pytest.fail(f"{label} exceeded {timeout_s:.1f}s (timed out after {elapsed:.3f}s)")
+
+    if not errors.empty():
+        raise errors.get()
+
     return elapsed
 
 
