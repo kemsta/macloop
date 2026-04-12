@@ -904,7 +904,12 @@ impl PyAsrSinkBackend {
         Ok(out)
     }
 
-    fn close(&mut self, py: Python<'_>, mut engine: PyRefMut<'_, PyAudioEngineBackend>) -> PyResult<()> {
+    #[pyo3(signature = (engine=None))]
+    fn close(
+        &mut self,
+        py: Python<'_>,
+        mut engine: Option<PyRefMut<'_, PyAudioEngineBackend>>,
+    ) -> PyResult<()> {
         let Some(mut sink) = self.sink.take() else {
             return Ok(());
         };
@@ -917,14 +922,17 @@ impl PyAsrSinkBackend {
         self.final_stats = Some(final_stats);
         let route_consumers = stop_result
             .map_err(|e| PyRuntimeError::new_err(format!("failed to stop asr sink: {e}")))?;
-        engine
-            .restore_route_consumers(
-                route_consumers
-                    .into_iter()
-                    .map(|input| (input.input_id, input.consumer))
-                    .collect(),
-            )
-            .map_err(|e| PyRuntimeError::new_err(format!("failed to restore asr sink routes: {e}")))?;
+
+        if let Some(engine) = engine.as_mut() {
+            engine
+                .restore_route_consumers(
+                    route_consumers
+                        .into_iter()
+                        .map(|input| (input.input_id, input.consumer))
+                        .collect(),
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("failed to restore asr sink routes: {e}")))?;
+        }
         Ok(())
     }
 
@@ -968,7 +976,12 @@ impl PyWavSinkBackend {
         Py::new(py, PyWavSinkStats::from_snapshot(py, snapshot)?)
     }
 
-    fn close(&mut self, py: Python<'_>, mut engine: PyRefMut<'_, PyAudioEngineBackend>) -> PyResult<()> {
+    #[pyo3(signature = (engine=None))]
+    fn close(
+        &mut self,
+        py: Python<'_>,
+        mut engine: Option<PyRefMut<'_, PyAudioEngineBackend>>,
+    ) -> PyResult<()> {
         let Some(mut sink) = self.sink.take() else {
             return Ok(());
         };
@@ -982,9 +995,12 @@ impl PyWavSinkBackend {
         self.final_stats = Some(final_stats);
         let consumers = stop_result
             .map_err(|e| PyRuntimeError::new_err(format!("failed to stop wav sink: {e}")))?;
-        engine
-            .restore_route_consumers(route_ids.into_iter().zip(consumers).collect())
-            .map_err(|e| PyRuntimeError::new_err(format!("failed to restore wav sink routes: {e}")))?;
+
+        if let Some(engine) = engine.as_mut() {
+            engine
+                .restore_route_consumers(route_ids.into_iter().zip(consumers).collect())
+                .map_err(|e| PyRuntimeError::new_err(format!("failed to restore wav sink routes: {e}")))?;
+        }
         Ok(())
     }
 
