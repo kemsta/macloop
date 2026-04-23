@@ -396,7 +396,7 @@ impl AsrSink {
             let idle_sleep = Duration::from_micros(200);
 
             loop {
-                if stop_thread.load(Ordering::Relaxed) {
+                if stop_thread.load(Ordering::Acquire) {
                     for state in &mut states {
                         state.stop_now();
                     }
@@ -442,7 +442,7 @@ impl AsrSink {
     }
 
     pub fn stop(&mut self) -> Result<Vec<AsrSinkInput>, AsrSinkError> {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
         let Some(handle) = self.handle.take() else {
             return Err(AsrSinkError::AlreadyStopped);
         };

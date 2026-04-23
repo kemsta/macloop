@@ -200,7 +200,7 @@ def test_audio_engine_close_propagates_backend_error_after_sink_cleanup(macloop_
     assert sink.closed is True
 
 
-def test_audio_engine_close_suppresses_backend_timeout_after_sink_cleanup(macloop_module) -> None:
+def test_audio_engine_close_warns_on_backend_timeout_after_sink_cleanup(macloop_module) -> None:
     class TrackingSink:
         def __init__(self) -> None:
             self.closed = False
@@ -213,7 +213,8 @@ def test_audio_engine_close_suppresses_backend_timeout_after_sink_cleanup(macloo
     engine._register_sink(sink)
     engine._backend.close = lambda: (_ for _ in ()).throw(TimeoutError("native close timed out"))
 
-    engine.close()
+    with pytest.warns(RuntimeWarning, match="deferred native cleanup"):
+        engine.close()
 
     assert sink.closed is True
     with pytest.raises(RuntimeError, match="audio engine is closed"):

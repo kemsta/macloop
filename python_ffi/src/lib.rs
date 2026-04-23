@@ -20,9 +20,10 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::os::raw::c_int;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DEFAULT_COMMAND_CAPACITY: usize = 32;
@@ -912,25 +913,134 @@ type DetachedAsrStartResult = Result<AsrSink, (String, Vec<(String, RouteConsume
 
 type DetachedWavStartResult = Result<WavFileOutput, (String, Vec<(String, RouteConsumer)>)>;
 
+const ASR_WORKER_QUEUE_CAPACITY: usize = 32;
+const ASR_WORKER_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+const ASR_WORKER_JOIN_POLL: Duration = Duration::from_millis(5);
+
+enum AsrWorkerPayload {
+    F32 {
+        input_id: String,
+        frames: usize,
+        samples: Vec<f32>,
+    },
+    I16 {
+        input_id: String,
+        frames: usize,
+        samples: Vec<i16>,
+    },
+}
+
 struct PythonAsrCallback {
-    callback: Py<PyAny>,
+    tx: Option<mpsc::SyncSender<AsrWorkerPayload>>,
+    worker: Option<JoinHandle<()>>,
+    dropped_chunks: Arc<AtomicU64>,
+}
+
+impl PythonAsrCallback {
+    fn spawn(callback: Py<PyAny>) -> Self {
+        let (tx, rx) = mpsc::sync_channel::<AsrWorkerPayload>(ASR_WORKER_QUEUE_CAPACITY);
+        let worker = thread::spawn(move || {
+            // `callback` is owned by this thread. Its final drop happens when this closure
+            // returns; PyO3 queues the decref and the next GIL holder releases it, so no
+            // extra Python attach is required here.
+            while let Ok(payload) = rx.recv() {
+                let _ = Python::try_attach(|py| {
+                    let (input_id, frames, samples_obj) = match payload {
+                        AsrWorkerPayload::F32 {
+                            input_id,
+                            frames,
+                            samples,
+                        } => (
+                            input_id,
+                            frames,
+                            samples.to_pyarray(py).into_any().unbind(),
+                        ),
+                        AsrWorkerPayload::I16 {
+                            input_id,
+                            frames,
+                            samples,
+                        } => (
+                            input_id,
+                            frames,
+                            samples.to_pyarray(py).into_any().unbind(),
+                        ),
+                    };
+
+                    if let Err(err) = callback.call1(py, (input_id, frames, samples_obj)) {
+                        err.print(py);
+                    }
+                });
+            }
+        });
+
+        Self {
+            tx: Some(tx),
+            worker: Some(worker),
+            dropped_chunks: Arc::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl AsrSinkCallback for PythonAsrCallback {
     fn on_chunk(&mut self, chunk: AsrChunkView<'_>) {
-        let _ = Python::try_attach(|py| {
-            let samples = match chunk.samples {
-                AsrSampleSlice::F32(values) => values.to_pyarray(py).into_any().unbind(),
-                AsrSampleSlice::I16(values) => values.to_pyarray(py).into_any().unbind(),
-            };
+        // Sink thread never blocks on user Python code: we hand chunks off to a worker via
+        // a bounded queue. If the user callback cannot keep up we drop the newest chunk so
+        // that shutdown (which drops `tx` to signal the worker) cannot be wedged by a slow
+        // or hung consumer.
+        let Some(tx) = self.tx.as_ref() else {
+            return;
+        };
 
-            if let Err(err) = self
-                .callback
-                .call1(py, (chunk.input_id, chunk.frames, samples))
-            {
-                err.print(py);
+        let payload = match chunk.samples {
+            AsrSampleSlice::F32(values) => AsrWorkerPayload::F32 {
+                input_id: chunk.input_id.to_string(),
+                frames: chunk.frames,
+                samples: values.to_vec(),
+            },
+            AsrSampleSlice::I16(values) => AsrWorkerPayload::I16 {
+                input_id: chunk.input_id.to_string(),
+                frames: chunk.frames,
+                samples: values.to_vec(),
+            },
+        };
+
+        match tx.try_send(payload) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.dropped_chunks.fetch_add(1, Ordering::Relaxed);
             }
-        });
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+}
+
+impl Drop for PythonAsrCallback {
+    fn drop(&mut self) {
+        // Drop the sender first so the worker's `rx.recv()` returns `Err(Disconnected)` and
+        // the loop can exit naturally once it finishes the chunk it is currently handling.
+        drop(self.tx.take());
+
+        let Some(handle) = self.worker.take() else {
+            return;
+        };
+
+        let deadline = Instant::now() + ASR_WORKER_JOIN_TIMEOUT;
+        while !handle.is_finished() && Instant::now() < deadline {
+            thread::sleep(ASR_WORKER_JOIN_POLL);
+        }
+
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            // The user callback is stuck. We can't unblock it, but we refuse to wedge the
+            // sink shutdown: detach the worker (dropping the JoinHandle) and move on. The
+            // leaked thread will exit whenever the user code finally returns.
+            eprintln!(
+                "macloop: ASR callback worker thread did not exit within {:?}; detaching to avoid blocking shutdown",
+                ASR_WORKER_JOIN_TIMEOUT
+            );
+            drop(handle);
+        }
     }
 }
 
@@ -1009,7 +1119,14 @@ impl PyAsrSinkBackend {
 
 impl Drop for PyAsrSinkBackend {
     fn drop(&mut self) {
-        let _ = Python::try_attach(|py| self.close_no_restore(py));
+        if Python::try_attach(|py| self.close_no_restore(py)).is_none() {
+            // The Python runtime is being torn down; the interpreter is unreachable.
+            // We cannot stop the sink worker or restore route consumers here, so log and leak
+            // rather than silently wedging or corrupting native state.
+            eprintln!(
+                "macloop: AsrSinkBackend dropped with Python runtime unavailable; sink cleanup skipped"
+            );
+        }
     }
 }
 
@@ -1077,7 +1194,11 @@ impl PyWavSinkBackend {
 
 impl Drop for PyWavSinkBackend {
     fn drop(&mut self) {
-        let _ = Python::try_attach(|py| self.close_no_restore(py));
+        if Python::try_attach(|py| self.close_no_restore(py)).is_none() {
+            eprintln!(
+                "macloop: WavSinkBackend dropped with Python runtime unavailable; sink cleanup skipped"
+            );
+        }
     }
 }
 
@@ -1604,7 +1725,7 @@ impl PyAudioEngineBackend {
                     format,
                     chunk_frames,
                 },
-                Box::new(PythonAsrCallback { callback }),
+                Box::new(PythonAsrCallback::spawn(callback)),
             ) {
                 Ok(sink) => Ok(sink),
                 Err((err, inputs)) => Err((
@@ -1703,7 +1824,11 @@ impl PyAudioEngineBackend {
 
 impl Drop for PyAudioEngineBackend {
     fn drop(&mut self) {
-        let _ = Python::try_attach(|py| self.close(py));
+        if Python::try_attach(|py| self.close(py)).is_none() {
+            eprintln!(
+                "macloop: AudioEngineBackend dropped with Python runtime unavailable; native sources may outlive the process"
+            );
+        }
     }
 }
 

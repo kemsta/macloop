@@ -4,6 +4,7 @@ import asyncio
 import os
 import queue
 import uuid
+import warnings
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,14 @@ def _raise_on_unexpected_kwargs(name: str, kwargs: dict[str, Any]) -> None:
         return
     unexpected = ", ".join(sorted(kwargs))
     raise TypeError(f"{name} got unexpected keyword arguments: {unexpected}")
+
+
+def _warn_deferred_native_cleanup(exc: TimeoutError) -> None:
+    warnings.warn(
+        f"AudioEngine.close() deferred native cleanup: {exc}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def _close_backend_with_optional_engine(backend: Any, engine_backend: Any | None) -> None:
@@ -375,7 +384,8 @@ class AudioEngine:
         sink_err: Optional[Exception] = None
         try:
             self._backend.close()
-        except TimeoutError:
+        except TimeoutError as exc:
+            _warn_deferred_native_cleanup(exc)
             backend_err = None
         except Exception as exc:
             backend_err = exc
