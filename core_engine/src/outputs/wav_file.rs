@@ -131,7 +131,7 @@ impl WavFileOutput {
             let mut mixed_buffer = Vec::<f32>::new();
 
             loop {
-                let stopping = stop_thread.load(Ordering::Relaxed);
+                let stopping = stop_thread.load(Ordering::Acquire);
                 let mut drained_any = false;
                 for (consumer, buffer) in consumers.iter_mut().zip(input_buffers.iter_mut()) {
                     let drain_limit = consumer.occupied_len() / frame_channels * frame_channels;
@@ -302,7 +302,7 @@ impl WavFileOutput {
     }
 
     pub fn stop(&mut self) -> Result<Vec<RouteConsumer>, WavOutputError> {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::Release);
         let Some(handle) = self.handle.take() else {
             return Err(WavOutputError::AlreadyStopped);
         };
