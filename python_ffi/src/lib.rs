@@ -1,6 +1,7 @@
 mod stats;
 
 use core_engine::{
+    microphone_access as core_microphone_access, screen_capture_access as core_screen_capture_access,
     AppAudioSource, AppAudioSourceConfig, ApplicationInfo, AsrChunkView, AsrSampleSlice, AsrSink,
     AsrSinkCallback, AsrSinkConfig, AsrSinkInput, AsrSinkMetricsSnapshot, AudioEngineController,
     AudioProcessor, DisplayInfo, EngineError, MicInfo, MicrophoneSource, MicrophoneSourceConfig,
@@ -1737,6 +1738,18 @@ fn list_applications(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
     Ok(list)
 }
 
+#[pyfunction]
+#[pyo3(signature = (prompt = false))]
+fn screen_capture_access(prompt: bool) -> bool {
+    core_screen_capture_access(prompt)
+}
+
+#[pyfunction]
+#[pyo3(signature = (prompt = false))]
+fn microphone_access(prompt: bool) -> String {
+    core_microphone_access(prompt).to_string()
+}
+
 #[pyfunction(name = "_create_asr_sink")]
 fn create_asr_sink(
     py: Python<'_>,
@@ -1912,6 +1925,8 @@ fn _macloop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(list_microphones, m)?)?;
     m.add_function(wrap_pyfunction!(list_displays, m)?)?;
     m.add_function(wrap_pyfunction!(list_applications, m)?)?;
+    m.add_function(wrap_pyfunction!(screen_capture_access, m)?)?;
+    m.add_function(wrap_pyfunction!(microphone_access, m)?)?;
     m.add_function(wrap_pyfunction!(create_asr_sink, m)?)?;
     m.add_function(wrap_pyfunction!(create_wav_sink, m)?)?;
     Ok(())

@@ -28,6 +28,7 @@ from ._macloop import (
 from ._macloop import list_applications as _list_applications
 from ._macloop import list_displays as _list_displays
 from ._macloop import list_microphones as _list_microphones
+from ._macloop import microphone_access, screen_capture_access
 
 
 AudioSamples = Union[npt.NDArray[np.int16], npt.NDArray[np.float32]]
@@ -764,4 +765,6 @@ __all__ = [
     "SyntheticSource",
     "WavSink",
     "WavSinkStats",
+    "microphone_access",
+    "screen_capture_access",
 ]

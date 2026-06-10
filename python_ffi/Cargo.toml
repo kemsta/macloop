@@ -1,6 +1,6 @@
 [package]
 name = "python_ffi"
-version = "0.1.1"
+version = "0.3.0"
 edition = "2021"
 description = "Python bindings and control plane for macloop"
 license = "MIT"
