@@ -307,6 +307,8 @@ def macloop_module(monkeypatch):
         {"id": 101, "name": "Display 101", "width": 2560, "height": 1440, "is_default": True},
         {"id": 202, "name": "Display 202", "width": 1920, "height": 1080, "is_default": False},
     ]
+    fake_ext.screen_capture_access = lambda prompt=False: True
+    fake_ext.microphone_access = lambda prompt=False: "authorized"
 
     monkeypatch.setitem(sys.modules, "macloop._macloop", fake_ext)
     sys.modules.pop("macloop", None)

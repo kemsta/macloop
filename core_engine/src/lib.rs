@@ -4,6 +4,7 @@ pub mod engine;
 pub mod format;
 pub mod metrics;
 pub mod outputs;
+pub mod permissions;
 pub mod processor;
 pub mod sources;
 
@@ -26,6 +27,7 @@ pub use outputs::asr_sink::{
     AsrSinkConfig, AsrSinkError, AsrSinkInput, AsrSinkMetricsSnapshot,
 };
 pub use outputs::wav_file::{WavFileOutput, WavOutputError, WavSinkMetricsSnapshot};
+pub use permissions::{microphone_access, screen_capture_access};
 pub use processor::{AudioProcessor, NodeId, OutputId, StreamId};
 pub use sources::app_audio::{
     AppAudioError, AppAudioSource, AppAudioSourceConfig, ApplicationInfo,

@@ -1,6 +1,6 @@
 [package]
 name = "core_engine"
-version = "0.1.1"
+version = "0.3.0"
 edition = "2021"
 description = "Pure Rust audio processing engine for macloop"
 license = "MIT"
@@ -13,7 +13,10 @@ audioadapter-buffers = "2.0.0"
 hound = "3.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
 bytemuck = "1.23.1"
 coreaudio-rs = "0.14.0"
+objc2 = "0.6.4"
 objc2-audio-toolbox = "0.3.2"
+objc2-av-foundation = { version = "0.3.2", features = ["AVCaptureDevice", "AVMediaFormat"] }
 screencapturekit = "1.5.4"
