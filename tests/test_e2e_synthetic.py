@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,22 @@ def _read_pcm16_wav(path: Path) -> tuple[tuple[int, int, int, int], list[int]]:
     assert fmt_info is not None
     assert samples is not None
     return fmt_info, samples
+
+
+def _wait_for_stream_callbacks(
+    engine: macloop.AudioEngine,
+    expected: dict[str, int],
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        stats = engine.stats()
+        if all(stats[stream_id].pipeline.latency.count >= count for stream_id, count in expected.items()):
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail(f"Synthetic streams did not produce every configured callback: {expected}")
+        time.sleep(0.01)
 
 
 def _collect_chunks(sink: macloop.AsrSink, count: int) -> list[macloop.AudioChunk]:
@@ -206,7 +223,7 @@ def test_explicit_pcm16_wav_and_asr_include_processed_gain(tmp_path: Path) -> No
         )
 
         chunks = _collect_chunks(asr_sink, 3)
-        threading.Event().wait(0.6)
+        _wait_for_stream_callbacks(engine, {stream.id: 151})
         asr_sink.close()
         wav_sink.close()
         wav_stats = wav_sink.stats()
@@ -318,8 +335,7 @@ def test_two_synthetic_sources_mix_into_aligned_wav(tmp_path: Path) -> None:
 
         wav_sink = macloop.WavSink(routes=[route_a, route_b], file=output_path)
 
-        # Let both synthetic sources finish and give the writer thread time to flush.
-        threading.Event().wait(0.5)
+        _wait_for_stream_callbacks(engine, {stream_a.id: 6, stream_b.id: 6})
         wav_sink.close()
 
     fmt_info, wav_samples = _read_float_wav(output_path)
