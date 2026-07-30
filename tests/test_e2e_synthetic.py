@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,52 @@ def _read_float_wav(path: Path) -> tuple[tuple[int, int, int], list[float]]:
     assert fmt_info is not None
     assert samples is not None
     return (fmt_info[0], fmt_info[1], fmt_info[2]), samples
+
+
+def _read_pcm16_wav(path: Path) -> tuple[tuple[int, int, int, int], list[int]]:
+    data = path.read_bytes()
+    assert data[:4] == b"RIFF"
+    assert data[8:12] == b"WAVE"
+
+    fmt_info = None
+    samples = None
+    offset = 12
+    while offset + 8 <= len(data):
+        chunk_id = data[offset : offset + 4]
+        size = struct.unpack_from("<I", data, offset + 4)[0]
+        body_start = offset + 8
+        body_end = body_start + size
+        body = data[body_start:body_end]
+
+        if chunk_id == b"fmt ":
+            audio_format, channels, sample_rate, _, _, bits_per_sample = struct.unpack_from(
+                "<HHIIHH", body, 0
+            )
+            fmt_info = (audio_format, channels, sample_rate, bits_per_sample)
+        elif chunk_id == b"data":
+            samples = [value for (value,) in struct.iter_unpack("<h", body)]
+
+        offset = body_end + (size & 1)
+
+    assert fmt_info is not None
+    assert samples is not None
+    return fmt_info, samples
+
+
+def _wait_for_stream_callbacks(
+    engine: macloop.AudioEngine,
+    expected: dict[str, int],
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        stats = engine.stats()
+        if all(stats[stream_id].pipeline.latency.count >= count for stream_id, count in expected.items()):
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail(f"Synthetic streams did not produce every configured callback: {expected}")
+        time.sleep(0.01)
 
 
 def _collect_chunks(sink: macloop.AsrSink, count: int) -> list[macloop.AudioChunk]:
@@ -138,6 +185,60 @@ def test_synthetic_source_reaches_asr_and_wav(tmp_path: Path) -> None:
         24.0,
         24.0,
     ]
+
+
+def test_explicit_pcm16_wav_and_asr_include_processed_gain(tmp_path: Path) -> None:
+    output_path = tmp_path / "synthetic_16khz_mono_pcm16.wav"
+    input_frames = 160 * 151
+    expected_output_frames = (input_frames * 16_000 + 47_999) // 48_000
+    expected_sample = 4096
+
+    with macloop.AudioEngine() as engine:
+        stream = engine.create_stream(
+            macloop.SyntheticSource,
+            frames_per_callback=160,
+            callback_count=151,
+            start_value=0.25,
+            step_value=0.0,
+            interval_ms=2,
+            start_delay_ms=200,
+        )
+        engine.add_processor(stream=stream, processor=macloop.GainProcessor(gain=0.5))
+
+        asr_route = engine.route("explicit_asr", stream=stream)
+        wav_route = engine.route("explicit_wav", stream=stream)
+        asr_sink = macloop.AsrSink(
+            routes=[asr_route],
+            chunk_frames=320,
+            sample_rate=16_000,
+            channels=1,
+            sample_format="i16",
+        )
+        wav_sink = macloop.WavSink(
+            route=wav_route,
+            file=output_path,
+            sample_rate=16_000,
+            channels=1,
+            sample_format="i16",
+        )
+
+        chunks = _collect_chunks(asr_sink, 3)
+        _wait_for_stream_callbacks(engine, {stream.id: 151})
+        asr_sink.close()
+        wav_sink.close()
+        wav_stats = wav_sink.stats()
+
+    assert chunks[-1].samples.dtype == np.int16
+    assert np.all(np.abs(chunks[-1].samples.astype(np.int32) - expected_sample) <= 2)
+
+    fmt_info, wav_samples = _read_pcm16_wav(output_path)
+    assert fmt_info == (1, 1, 16_000, 16)
+    assert len(wav_samples) == expected_output_frames
+    assert all(
+        abs(sample - expected_sample) <= 2 for sample in wav_samples[1000:-1000]
+    )
+    assert wav_stats.samples_written == len(wav_samples)
+    assert wav_stats.frames_written == len(wav_samples)
 
 
 def test_synthetic_source_reaches_i16_asr_output() -> None:
@@ -234,8 +335,7 @@ def test_two_synthetic_sources_mix_into_aligned_wav(tmp_path: Path) -> None:
 
         wav_sink = macloop.WavSink(routes=[route_a, route_b], file=output_path)
 
-        # Let both synthetic sources finish and give the writer thread time to flush.
-        threading.Event().wait(0.5)
+        _wait_for_stream_callbacks(engine, {stream_a.id: 6, stream_b.id: 6})
         wav_sink.close()
 
     fmt_info, wav_samples = _read_float_wav(output_path)

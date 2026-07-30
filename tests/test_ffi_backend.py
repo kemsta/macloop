@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import queue
 import struct
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,18 @@ def _wait_for_chunks(
     count: int,
 ) -> list[tuple[str, int, np.ndarray]]:
     return [collected.get(timeout=2.0) for _ in range(count)]
+
+
+def _open_file_descriptors() -> set[int]:
+    descriptors = set()
+    for name in os.listdir("/dev/fd"):
+        try:
+            fd = int(name)
+            os.fstat(fd)
+        except (OSError, ValueError):
+            continue
+        descriptors.add(fd)
+    return descriptors
 
 
 def test_low_level_ffi_asr_sink_round_trip() -> None:
@@ -104,7 +118,9 @@ def test_low_level_ffi_asr_sink_round_trip() -> None:
     assert sink_stats.callback.count == 2
 
 
-def test_low_level_ffi_wav_sink_writes_output(tmp_path: Path) -> None:
+def test_low_level_ffi_wav_sink_old_five_arg_api_writes_default_format(
+    tmp_path: Path,
+) -> None:
     output_path = tmp_path / "ffi_synthetic.wav"
 
     engine = ffi._AudioEngineBackend()
@@ -122,7 +138,13 @@ def test_low_level_ffi_wav_sink_writes_output(tmp_path: Path) -> None:
     engine.route("wav_route", "synthetic_stream")
 
     with output_path.open("w+b") as fileobj:
-        sink = ffi._create_wav_sink(engine, "ffi_wav_sink", ["wav_route"], fileobj.fileno(), 1.0)
+        sink = ffi._create_wav_sink(
+            engine,
+            "ffi_wav_sink",
+            ["wav_route"],
+            fileobj.fileno(),
+            1.0,
+        )
         try:
             threading.Event().wait(0.5)
             stats = sink.stats()
@@ -139,7 +161,150 @@ def test_low_level_ffi_wav_sink_writes_output(tmp_path: Path) -> None:
     assert stats.frames_written == 12
 
 
-def test_low_level_ffi_validates_invalid_configs() -> None:
+def test_low_level_ffi_wav_sink_converts_to_mono_pcm16(tmp_path: Path) -> None:
+    output_path = tmp_path / "ffi_synthetic_pcm16.wav"
+
+    engine = ffi._AudioEngineBackend()
+    engine.create_stream(
+        "synthetic_stream",
+        "synthetic",
+        {
+            "frames_per_callback": 160,
+            "callback_count": 60,
+            "start_value": 0.25,
+            "step_value": 0.0,
+            "interval_ms": 3,
+            "start_delay_ms": 100,
+        },
+    )
+    engine.route("wav_route", "synthetic_stream")
+
+    with output_path.open("w+b") as fileobj:
+        sink = ffi._create_wav_sink_with_config(
+            engine,
+            "ffi_wav_sink_pcm16",
+            ["wav_route"],
+            fileobj.fileno(),
+            16_000,
+            1,
+            "i16",
+            1.0,
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            while engine.get_stats()["synthetic_stream"].pipeline.latency.count < 60:
+                if time.monotonic() >= deadline:
+                    pytest.fail("Synthetic source did not produce every configured callback")
+                time.sleep(0.01)
+        finally:
+            sink.close()
+            stats = sink.stats()
+            engine.close()
+
+    data = output_path.read_bytes()
+    fmt_offset = data.index(b"fmt ") + 8
+    audio_format, channels, sample_rate, _, _, bits_per_sample = struct.unpack_from(
+        "<HHIIHH", data, fmt_offset
+    )
+    data_offset = data.index(b"data")
+    data_size = struct.unpack_from("<I", data, data_offset + 4)[0]
+    samples = [
+        value
+        for (value,) in struct.iter_unpack(
+            "<h", data[data_offset + 8 : data_offset + 8 + data_size]
+        )
+    ]
+
+    assert audio_format == 1
+    assert (channels, sample_rate, bits_per_sample) == (1, 16_000, 16)
+    assert len(samples) == 3_200
+    assert all(abs(sample - 8192) <= 2 for sample in samples[500:-500])
+    assert stats.samples_written == len(samples)
+    assert stats.frames_written == len(samples)
+
+
+def test_wav_close_error_restores_route_and_closes_duplicated_fd(tmp_path: Path) -> None:
+    read_only_path = tmp_path / "read_only.wav"
+    read_only_path.touch()
+    recovered_path = tmp_path / "recovered.wav"
+    engine = ffi._AudioEngineBackend()
+    engine.create_stream(
+        "synthetic_stream",
+        "synthetic",
+        {
+            "frames_per_callback": 4,
+            "callback_count": 1,
+            "start_value": 0.25,
+            "start_delay_ms": 100,
+        },
+    )
+    engine.route("wav_route", "synthetic_stream")
+
+    try:
+        with read_only_path.open("rb") as fileobj:
+            descriptors_before = _open_file_descriptors()
+            sink = ffi._create_wav_sink(
+                engine,
+                "failing_wav_sink",
+                ["wav_route"],
+                fileobj.fileno(),
+                1.0,
+            )
+            with pytest.raises(
+                RuntimeError,
+                match="failed to stop wav sink: wav writer error",
+            ):
+                sink.close(engine)
+
+            stats = sink.stats()
+            assert stats.finalize.count == 1
+            assert _open_file_descriptors() == descriptors_before
+
+        with recovered_path.open("w+b") as fileobj:
+            replacement = ffi._create_wav_sink(
+                engine,
+                "replacement_wav_sink",
+                ["wav_route"],
+                fileobj.fileno(),
+                1.0,
+            )
+            replacement.close(engine)
+    finally:
+        engine.close()
+
+
+def test_wav_close_combines_write_and_restoration_errors(tmp_path: Path) -> None:
+    read_only_path = tmp_path / "read_only_combined.wav"
+    read_only_path.touch()
+    engine = ffi._AudioEngineBackend()
+    wrong_engine = ffi._AudioEngineBackend()
+    engine.create_stream("synthetic_stream", "synthetic", {"start_delay_ms": 100})
+    engine.route("wav_route", "synthetic_stream")
+    wrong_engine.create_stream("other_stream", "synthetic", {})
+    wrong_engine.route("wav_route", "other_stream")
+
+    try:
+        with read_only_path.open("rb") as fileobj:
+            sink = ffi._create_wav_sink(
+                engine,
+                "failing_wav_sink",
+                ["wav_route"],
+                fileobj.fileno(),
+                1.0,
+            )
+            with pytest.raises(RuntimeError) as exc_info:
+                sink.close(wrong_engine)
+
+        message = str(exc_info.value)
+        assert "failed to stop wav sink: wav writer error" in message
+        assert "additionally failed to restore wav sink routes" in message
+        assert sink.stats().finalize.count == 1
+    finally:
+        engine.close()
+        wrong_engine.close()
+
+
+def test_low_level_ffi_validates_invalid_configs(tmp_path: Path) -> None:
     engine = ffi._AudioEngineBackend()
 
     with pytest.raises(ValueError, match="unsupported source_kind"):
@@ -166,5 +331,43 @@ def test_low_level_ffi_validates_invalid_configs() -> None:
             320,
             lambda *_args: None,
         )
+
+    output_path = tmp_path / "invalid.wav"
+    with output_path.open("w+b") as fileobj:
+        with pytest.raises(ValueError, match="unsupported sample_format"):
+            ffi._create_wav_sink_with_config(
+                engine,
+                "bad_wav_format",
+                ["synthetic_route"],
+                fileobj.fileno(),
+                16_000,
+                1,
+                "u8",
+                1.0,
+            )
+
+        with pytest.raises(ValueError, match="unsupported output channels"):
+            ffi._create_wav_sink_with_config(
+                engine,
+                "bad_wav_channels",
+                ["synthetic_route"],
+                fileobj.fileno(),
+                16_000,
+                3,
+                "i16",
+                1.0,
+            )
+
+        sink = ffi._create_wav_sink_with_config(
+            engine,
+            "valid_wav_after_errors",
+            ["synthetic_route"],
+            fileobj.fileno(),
+            48_000,
+            2,
+            "f32",
+            1.0,
+        )
+        sink.close(engine)
 
     engine.close()

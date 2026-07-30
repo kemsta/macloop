@@ -214,8 +214,10 @@ impl InputState {
         let input_channels = MASTER_FORMAT.channels.max(1) as usize;
         let ready_input_samples = self.drained_master.len() / input_channels * input_channels;
         if ready_input_samples > 0 {
-            self.converter
-                .convert(&self.drained_master[..ready_input_samples], &mut self.converted_output)?;
+            self.converter.convert(
+                &self.drained_master[..ready_input_samples],
+                &mut self.converted_output,
+            )?;
             if !self.converted_output.is_empty() {
                 self.pending_output
                     .extend_from_slice(&self.converted_output);

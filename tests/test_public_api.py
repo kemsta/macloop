@@ -284,7 +284,16 @@ def test_wav_sink_accepts_file_objects_and_engine_closes_sinks(macloop_module) -
     with tempfile.TemporaryFile() as fileobj:
         sink = macloop_module.WavSink(route=route, file=fileobj)
         assert sink.id.startswith("wav_sink_")
-        assert engine._backend.calls[-1] == ("create_wav_sink", sink.id, (route.id,), fileobj.fileno(), 1.0)
+        assert engine._backend.calls[-1] == (
+            "create_wav_sink_with_config",
+            sink.id,
+            (route.id,),
+            fileobj.fileno(),
+            48_000,
+            2,
+            "f32",
+            1.0,
+        )
         assert sink._backend.closed is False
         stats = sink.stats()
         assert stats.write_calls == 3
@@ -310,10 +319,13 @@ def test_wav_sink_accepts_multiple_routes(macloop_module) -> None:
             sink = macloop_module.WavSink(routes=[route_a, route_b], file=fileobj)
 
             assert engine._backend.calls[-1] == (
-                "create_wav_sink",
+                "create_wav_sink_with_config",
                 sink.id,
                 (route_a.id, route_b.id),
                 fileobj.fileno(),
+                48_000,
+                2,
+                "f32",
                 0.5,
             )
 
@@ -325,10 +337,64 @@ def test_wav_sink_accepts_multiple_routes(macloop_module) -> None:
         with tempfile.TemporaryFile() as fileobj:
             second = macloop_module.WavSink(routes=[route_a, route_b], file=fileobj, mix_gain=0.25)
             assert engine._backend.calls[-1] == (
-                "create_wav_sink",
+                "create_wav_sink_with_config",
                 second.id,
                 (route_a.id, route_b.id),
                 fileobj.fileno(),
+                48_000,
+                2,
+                "f32",
                 0.25,
             )
             second.close()
+
+
+def test_wav_sink_passes_explicit_output_format(macloop_module) -> None:
+    with macloop_module.AudioEngine() as engine:
+        stream = engine.create_stream(macloop_module.MicrophoneSource, "mic")
+        route = engine.route("wav_route", stream=stream)
+
+        with tempfile.TemporaryFile() as fileobj:
+            sink = macloop_module.WavSink(
+                route=route,
+                file=fileobj,
+                sample_rate=16_000,
+                channels=1,
+                sample_format="i16",
+                mix_gain=1.0,
+            )
+
+            assert engine._backend.calls[-1] == (
+                "create_wav_sink_with_config",
+                sink.id,
+                (route.id,),
+                fileobj.fileno(),
+                16_000,
+                1,
+                "i16",
+                1.0,
+            )
+            sink.close()
+
+
+@pytest.mark.parametrize(
+    "format_kwargs",
+    [
+        {"sample_rate": 16_000},
+        {"channels": 1, "sample_format": "i16"},
+        {"sample_rate": 16_000, "sample_format": "i16"},
+    ],
+)
+def test_wav_sink_requires_complete_explicit_output_format(
+    macloop_module, format_kwargs
+) -> None:
+    with macloop_module.AudioEngine() as engine:
+        stream = engine.create_stream(macloop_module.MicrophoneSource, "mic")
+        route = engine.route("wav_route", stream=stream)
+
+        with tempfile.TemporaryFile() as fileobj:
+            with pytest.raises(
+                ValueError,
+                match="sample_rate, channels, and sample_format must be provided together",
+            ):
+                macloop_module.WavSink(route=route, file=fileobj, **format_kwargs)

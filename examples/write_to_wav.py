@@ -18,6 +18,14 @@ def main() -> None:
     parser.add_argument("--seconds", type=float, default=5.0, help="How long to record.")
     parser.add_argument("--device-id", type=int, default=None, help="Optional microphone device id.")
     parser.add_argument("--output", default="out/mic.wav", help="Output WAV path.")
+    parser.add_argument("--sample-rate", type=int, default=16_000, help="Output sample rate.")
+    parser.add_argument("--channels", type=int, choices=(1, 2), default=1, help="Output channels.")
+    parser.add_argument(
+        "--sample-format",
+        choices=("f32", "i16"),
+        default="i16",
+        help="Output sample format.",
+    )
     parser.add_argument("--list-mics", action="store_true", help="List available microphones and exit.")
     args = parser.parse_args()
 
@@ -37,7 +45,13 @@ def main() -> None:
             vpio_enabled=vpio_enabled,
         )
         mic_for_wav = engine.route(stream=mic)
-        wav_sink = macloop.WavSink(route=mic_for_wav, file=output)
+        wav_sink = macloop.WavSink(
+            route=mic_for_wav,
+            file=output,
+            sample_rate=args.sample_rate,
+            channels=args.channels,
+            sample_format=args.sample_format,
+        )
 
         print(f"Recording microphone to {output.resolve()} for {args.seconds:.1f}s...")
         time.sleep(args.seconds)
