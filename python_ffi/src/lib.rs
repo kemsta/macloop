@@ -1,12 +1,13 @@
 mod stats;
 
 use core_engine::{
-    microphone_access as core_microphone_access, screen_capture_access as core_screen_capture_access,
-    AppAudioSource, AppAudioSourceConfig, ApplicationInfo, AsrChunkView, AsrSampleSlice, AsrSink,
-    AsrSinkCallback, AsrSinkConfig, AsrSinkInput, AsrSinkMetricsSnapshot, AudioEngineController,
-    AudioProcessor, DisplayInfo, EngineError, MicInfo, MicrophoneSource, MicrophoneSourceConfig,
-    NodeMetrics, RouteConsumer, SampleFormat, SourceType, StreamFormat, SyntheticSource,
-    SyntheticSourceConfig, SystemAudioSource, SystemAudioSourceConfig, WavFileOutput,
+    microphone_access as core_microphone_access,
+    screen_capture_access as core_screen_capture_access, AppAudioSource, AppAudioSourceConfig,
+    ApplicationInfo, AsrChunkView, AsrSampleSlice, AsrSink, AsrSinkCallback, AsrSinkConfig,
+    AsrSinkInput, AsrSinkMetricsSnapshot, AudioEngineController, AudioProcessor, DisplayInfo,
+    EngineError, MicInfo, MicrophoneSource, MicrophoneSourceConfig, NodeMetrics, RouteConsumer,
+    SampleFormat, SourceType, StreamFormat, SyntheticSource, SyntheticSourceConfig,
+    SystemAudioSource, SystemAudioSourceConfig, WavFileOutput, WavSinkConfig,
     WavSinkMetricsSnapshot,
 };
 use numpy::ToPyArray;
@@ -1097,7 +1098,9 @@ impl PyAsrSinkBackend {
                         .map(|input| (input.input_id, input.consumer))
                         .collect(),
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("failed to restore asr sink routes: {e}")))?;
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("failed to restore asr sink routes: {e}"))
+                })?;
         }
         Ok(())
     }
@@ -1160,21 +1163,36 @@ impl PyWavSinkBackend {
         };
         let route_ids = self.route_ids.clone();
 
-        let (stop_result, final_stats) = py.detach(move || {
-            let stop_result = sink.stop().map_err(|e| e.to_string());
+        let (stop_result, consumers, final_stats) = py.detach(move || {
+            let (stop_result, consumers) = match sink.stop_with_consumers() {
+                Ok(consumers) => (Ok(()), consumers),
+                Err((err, consumers)) => (Err(err.to_string()), consumers),
+            };
             let final_stats = sink.stats();
-            (stop_result, final_stats)
+            (stop_result, consumers, final_stats)
         });
         self.final_stats = Some(final_stats);
-        let consumers = stop_result
-            .map_err(|e| PyRuntimeError::new_err(format!("failed to stop wav sink: {e}")))?;
 
-        if let Some(engine) = engine.as_mut() {
+        let restore_result = if let Some(engine) = engine.as_mut() {
             engine
                 .restore_route_consumers(route_ids.into_iter().zip(consumers).collect())
-                .map_err(|e| PyRuntimeError::new_err(format!("failed to restore wav sink routes: {e}")))?;
+                .map_err(|err| err.to_string())
+        } else {
+            Ok(())
+        };
+
+        match (stop_result, restore_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(stop_err), Ok(())) => Err(PyRuntimeError::new_err(format!(
+                "failed to stop wav sink: {stop_err}"
+            ))),
+            (Ok(()), Err(restore_err)) => Err(PyRuntimeError::new_err(format!(
+                "failed to restore wav sink routes: {restore_err}"
+            ))),
+            (Err(stop_err), Err(restore_err)) => Err(PyRuntimeError::new_err(format!(
+                "failed to stop wav sink: {stop_err}; additionally failed to restore wav sink routes: {restore_err}"
+            ))),
         }
-        Ok(())
     }
 
     fn close_no_restore(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -1182,13 +1200,11 @@ impl PyWavSinkBackend {
             return Ok(());
         };
 
-        let (stop_result, final_stats) = py.detach(move || {
-            let stop_result = sink.stop().map_err(|e| e.to_string());
-            let final_stats = sink.stats();
-            (stop_result, final_stats)
+        let final_stats = py.detach(move || {
+            let _ = sink.stop_with_consumers();
+            sink.stats()
         });
         self.final_stats = Some(final_stats);
-        let _ = stop_result;
         Ok(())
     }
 }
@@ -1760,10 +1776,24 @@ impl PyAudioEngineBackend {
         py: Python<'_>,
         route_ids: Vec<String>,
         fd: i32,
+        sample_rate: u32,
+        channels: u16,
+        sample_format: String,
         mix_gain: f32,
     ) -> PyResult<PyWavSinkBackend> {
         self.ensure_open()?;
         self.ensure_route_consumers_available(&route_ids)?;
+
+        let config = WavSinkConfig {
+            format: StreamFormat::with_sample_format(
+                sample_rate,
+                channels,
+                parse_sample_format(&sample_format)?,
+            ),
+            mix_gain,
+        };
+        WavFileOutput::validate_config(config)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
         let file = duplicate_file_descriptor(fd)
             .map_err(|e| PyOSError::new_err(format!("failed to duplicate file descriptor: {e}")))?;
@@ -1789,14 +1819,13 @@ impl PyAudioEngineBackend {
 
         let route_consumers = self.take_route_consumers(&route_ids)?;
         let route_ids_for_sink = route_ids.clone();
-        let master_format = self.controller.master_format();
         let detached_result: DetachedWavStartResult = py.detach(move || {
             let consumers = route_consumers
                 .into_iter()
                 .map(|(_, consumer)| consumer)
                 .collect();
 
-            match WavFileOutput::try_spawn_file_mix(file, master_format, consumers, mix_gain) {
+            match WavFileOutput::try_spawn_file_mix_with_config(file, consumers, config) {
                 Ok(sink) => Ok(sink),
                 Err((err, consumers)) => Err((
                     format!("failed to create wav sink: {err}"),
@@ -1909,7 +1938,31 @@ fn create_wav_sink(
     mix_gain: f32,
 ) -> PyResult<PyWavSinkBackend> {
     let _ = sink_id;
-    engine.build_wav_sink(py, route_ids, fd, mix_gain)
+    engine.build_wav_sink(py, route_ids, fd, 48_000, 2, "f32".to_string(), mix_gain)
+}
+
+#[pyfunction(name = "_create_wav_sink_with_config")]
+fn create_wav_sink_with_config(
+    py: Python<'_>,
+    mut engine: PyRefMut<'_, PyAudioEngineBackend>,
+    sink_id: String,
+    route_ids: Vec<String>,
+    fd: i32,
+    sample_rate: u32,
+    channels: u16,
+    sample_format: String,
+    mix_gain: f32,
+) -> PyResult<PyWavSinkBackend> {
+    let _ = sink_id;
+    engine.build_wav_sink(
+        py,
+        route_ids,
+        fd,
+        sample_rate,
+        channels,
+        sample_format,
+        mix_gain,
+    )
 }
 
 fn append_microphone_info(list: &Bound<'_, PyList>, mic: MicInfo) -> PyResult<()> {
@@ -2054,6 +2107,7 @@ fn _macloop(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(microphone_access, m)?)?;
     m.add_function(wrap_pyfunction!(create_asr_sink, m)?)?;
     m.add_function(wrap_pyfunction!(create_wav_sink, m)?)?;
+    m.add_function(wrap_pyfunction!(create_wav_sink_with_config, m)?)?;
     Ok(())
 }
 

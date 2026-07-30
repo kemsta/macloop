@@ -26,7 +26,7 @@ pub use outputs::asr_sink::{
     AsrChunkView, AsrInputId, AsrInputMetricsSnapshot, AsrSampleSlice, AsrSink, AsrSinkCallback,
     AsrSinkConfig, AsrSinkError, AsrSinkInput, AsrSinkMetricsSnapshot,
 };
-pub use outputs::wav_file::{WavFileOutput, WavOutputError, WavSinkMetricsSnapshot};
+pub use outputs::wav_file::{WavFileOutput, WavOutputError, WavSinkConfig, WavSinkMetricsSnapshot};
 pub use permissions::{microphone_access, screen_capture_access};
 pub use processor::{AudioProcessor, NodeId, OutputId, StreamId};
 pub use sources::app_audio::{

@@ -277,7 +277,34 @@ def _fake_create_asr_sink(
 
 
 def _fake_create_wav_sink(engine, sink_id, route_ids, fd, mix_gain):
-    engine.calls.append(("create_wav_sink", sink_id, tuple(route_ids), fd, mix_gain))
+    engine.calls.append(
+        ("create_wav_sink", sink_id, tuple(route_ids), fd, mix_gain)
+    )
+    return _FakeWavSinkBackend()
+
+
+def _fake_create_wav_sink_with_config(
+    engine,
+    sink_id,
+    route_ids,
+    fd,
+    sample_rate,
+    channels,
+    sample_format,
+    mix_gain,
+):
+    engine.calls.append(
+        (
+            "create_wav_sink_with_config",
+            sink_id,
+            tuple(route_ids),
+            fd,
+            sample_rate,
+            channels,
+            sample_format,
+            mix_gain,
+        )
+    )
     return _FakeWavSinkBackend()
 
 
@@ -295,6 +322,7 @@ def macloop_module(monkeypatch):
     fake_ext.WavSinkStats = _FakeWavSinkStats
     fake_ext._create_asr_sink = _fake_create_asr_sink
     fake_ext._create_wav_sink = _fake_create_wav_sink
+    fake_ext._create_wav_sink_with_config = _fake_create_wav_sink_with_config
     fake_ext.list_microphones = lambda: [
         {"id": 11, "name": "Built-in Mic", "is_default": True},
         {"id": 22, "name": "USB Mic", "is_default": False},

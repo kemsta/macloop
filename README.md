@@ -86,7 +86,7 @@ Examples:
 | Processors | `GainProcessor` |
 | Sinks | `AsrSink`, `WavSink` |
 | ASR delivery | sync iteration and `asyncio` iteration |
-| Output formats | `AsrSink`: `f32` / `i16`, mono or stereo |
+| Output formats | `AsrSink` and `WavSink`: `f32` / `i16`, mono or stereo |
 | Metrics | `engine.stats()`, `asr_sink.stats()`, `wav_sink.stats()` |
 
 ---
@@ -150,7 +150,13 @@ with macloop.AudioEngine() as engine:
     mic_for_asr = engine.route("mic_for_asr", stream=mic)
     mic_for_wav = engine.route("mic_for_wav", stream=mic)
 
-    wav_sink = macloop.WavSink(route=mic_for_wav, file="out/mic.wav")
+    wav_sink = macloop.WavSink(
+        route=mic_for_wav,
+        file="out/mic.wav",
+        sample_rate=16_000,
+        channels=1,
+        sample_format="i16",
+    )
     asr_sink = macloop.AsrSink(
         routes=[mic_for_asr],
         chunk_frames=320,
@@ -204,6 +210,9 @@ with macloop.AudioEngine() as engine:
     wav_sink = macloop.WavSink(
         routes=[mic_for_wav, zoom_for_wav],
         file="out/meeting.wav",
+        sample_rate=16_000,
+        channels=1,
+        sample_format="i16",
     )
 
     asr_sink = macloop.AsrSink(
@@ -224,7 +233,9 @@ Notes:
 
 - `AsrSink` emits **independent chunks per route**.
 - `WavSink` can mix several routes into one file.
-- If `mix_gain` is not provided, `WavSink` uses `1 / N` by default.
+- Set `sample_rate`, `channels`, and `sample_format` together to choose the WAV format. `channels` supports `1` or `2`; `sample_format` supports `"f32"` or `"i16"`.
+- If all three format fields are omitted, `WavSink` writes the existing 48 kHz stereo float32 format.
+- If `mix_gain` is omitted, `WavSink` uses `1 / N`. Set `mix_gain=1.0` to sum routes before format conversion; it does not normalize loudness.
 
 ---
 

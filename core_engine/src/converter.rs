@@ -70,6 +70,9 @@ pub struct MasterFormatConverter {
     pending_interleaved: Vec<f32>,
     deinterleaved_in: Vec<Vec<f32>>,
     deinterleaved_out: Vec<Vec<f32>>,
+    output_delay_frames_remaining: usize,
+    total_input_frames: u64,
+    total_output_frames: u64,
 }
 
 impl MasterFormatConverter {
@@ -111,6 +114,9 @@ impl MasterFormatConverter {
             None
         };
 
+        let output_delay_frames_remaining =
+            resampler.as_ref().map(Resampler::output_delay).unwrap_or(0);
+
         Ok(Self {
             input_format,
             output_format,
@@ -119,7 +125,94 @@ impl MasterFormatConverter {
             pending_interleaved: Vec::new(),
             deinterleaved_in: Vec::new(),
             deinterleaved_out: Vec::new(),
+            output_delay_frames_remaining,
+            total_input_frames: 0,
+            total_output_frames: 0,
         })
+    }
+
+    pub fn finish(&mut self, output: &mut Vec<f32>) -> Result<(), InputConversionError> {
+        output.clear();
+        if self.resampler.is_none() {
+            return Ok(());
+        }
+
+        let target_output_frames = self.expected_output_frames();
+        let channels = self.output_format.channels as usize;
+        while self.total_output_frames < target_output_frames {
+            let input_frames_next = self
+                .resampler
+                .as_ref()
+                .expect("resampler presence checked above")
+                .input_frames_next();
+            let pending_frames = self.pending_interleaved.len() / channels;
+            let partial_frames = pending_frames.min(input_frames_next);
+            let partial_samples = partial_frames * channels;
+            Self::deinterleave_padded_into(
+                &mut self.deinterleaved_in,
+                &self.pending_interleaved[..partial_samples],
+                channels,
+                input_frames_next,
+            );
+
+            let (used_in, used_out) = {
+                let resampler = self
+                    .resampler
+                    .as_mut()
+                    .expect("resampler presence checked above");
+                let adapter_in =
+                    SequentialSliceOfVecs::new(&self.deinterleaved_in, channels, input_frames_next)
+                        .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
+
+                let output_frames_cap = resampler.output_frames_max().max(1);
+                Self::ensure_output_storage(
+                    &mut self.deinterleaved_out,
+                    channels,
+                    output_frames_cap,
+                );
+                let mut adapter_out = SequentialSliceOfVecs::new_mut(
+                    &mut self.deinterleaved_out,
+                    channels,
+                    output_frames_cap,
+                )
+                .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
+
+                resampler
+                    .process_into_buffer(
+                        &adapter_in,
+                        &mut adapter_out,
+                        Some(&Indexing {
+                            input_offset: 0,
+                            output_offset: 0,
+                            partial_len: Some(partial_frames),
+                            active_channels_mask: None,
+                        }),
+                    )
+                    .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?
+            };
+
+            if partial_frames > 0 {
+                let consumed_samples = used_in.min(partial_frames) * channels;
+                self.pending_interleaved.drain(..consumed_samples);
+            }
+            if used_out == 0 {
+                return Err(InputConversionError::ResamplerProcess(
+                    "resampler produced no output while finishing".to_string(),
+                ));
+            }
+
+            self.append_trimmed_resampler_output(used_out, target_output_frames, output);
+        }
+
+        self.pending_interleaved.clear();
+        Ok(())
+    }
+
+    fn expected_output_frames(&self) -> u64 {
+        let numerator = self.total_input_frames as u128 * self.output_format.sample_rate as u128;
+        let denominator = self.input_format.sample_rate as u128;
+        let frames = numerator.div_ceil(denominator);
+        frames.min(u64::MAX as u128) as u64
     }
 
     fn convert_channels(
@@ -189,6 +282,23 @@ impl MasterFormatConverter {
         }
     }
 
+    fn deinterleave_padded_into(
+        storage: &mut Vec<Vec<f32>>,
+        input: &[f32],
+        channels: usize,
+        padded_frames: usize,
+    ) {
+        Self::ensure_channels_storage(storage, channels, padded_frames);
+        for channel in storage.iter_mut() {
+            channel.resize(padded_frames, 0.0);
+        }
+        for (frame_index, frame) in input.chunks_exact(channels).enumerate() {
+            for (channel_index, sample) in frame.iter().enumerate() {
+                storage[channel_index][frame_index] = *sample;
+            }
+        }
+    }
+
     fn ensure_output_storage(storage: &mut Vec<Vec<f32>>, channels: usize, frames_cap: usize) {
         if storage.len() != channels {
             storage.clear();
@@ -202,14 +312,44 @@ impl MasterFormatConverter {
         }
     }
 
-    fn interleave_append_to(channels_data: &[Vec<f32>], frames: usize, out: &mut Vec<f32>) {
+    fn interleave_range_append_to(
+        channels_data: &[Vec<f32>],
+        first_frame: usize,
+        frames: usize,
+        out: &mut Vec<f32>,
+    ) {
         let channels = channels_data.len();
         out.reserve(frames * channels);
-        for frame in 0..frames {
+        for frame in first_frame..first_frame + frames {
             for channel in channels_data.iter().take(channels) {
                 out.push(channel[frame]);
             }
         }
+    }
+
+    fn append_trimmed_resampler_output(
+        &mut self,
+        produced_frames: usize,
+        target_output_frames: u64,
+        output: &mut Vec<f32>,
+    ) {
+        let delay_frames = self.output_delay_frames_remaining.min(produced_frames);
+        self.output_delay_frames_remaining -= delay_frames;
+
+        let available_frames = produced_frames - delay_frames;
+        let remaining_target_frames = target_output_frames
+            .saturating_sub(self.total_output_frames)
+            .min(usize::MAX as u64) as usize;
+        let emitted_frames = available_frames.min(remaining_target_frames);
+        Self::interleave_range_append_to(
+            &self.deinterleaved_out,
+            delay_frames,
+            emitted_frames,
+            output,
+        );
+        self.total_output_frames = self
+            .total_output_frames
+            .saturating_add(emitted_frames as u64);
     }
 }
 
@@ -233,25 +373,35 @@ impl InputConverter for MasterFormatConverter {
             self.output_format.channels,
             &mut self.channels_buffer,
         )?;
+        let converted_input_frames =
+            self.channels_buffer.len() / self.output_format.channels as usize;
+        self.total_input_frames = self
+            .total_input_frames
+            .saturating_add(converted_input_frames as u64);
 
         if self.resampler.is_none() {
             output.clear();
             output.extend_from_slice(&self.channels_buffer);
+            self.total_output_frames = self
+                .total_output_frames
+                .saturating_add(converted_input_frames as u64);
             return Ok(());
         }
 
         output.clear();
         let channels = self.output_format.channels as usize;
-        let Some(resampler) = self.resampler.as_mut() else {
-            return Ok(());
-        };
         self.pending_interleaved
             .extend_from_slice(&self.channels_buffer);
+        let target_output_frames = self.expected_output_frames();
 
         let mut consumed_frames = 0usize;
         loop {
             let pending_frames = self.pending_interleaved.len() / channels;
-            let input_frames_next = resampler.input_frames_next();
+            let input_frames_next = self
+                .resampler
+                .as_ref()
+                .expect("resampler presence checked above")
+                .input_frames_next();
             if pending_frames.saturating_sub(consumed_frames) < input_frames_next {
                 break;
             }
@@ -263,33 +413,45 @@ impl InputConverter for MasterFormatConverter {
                 &self.pending_interleaved[start..end],
                 channels,
             );
-            let adapter_in =
-                SequentialSliceOfVecs::new(&self.deinterleaved_in, channels, input_frames_next)
-                    .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
 
-            let output_frames_cap = resampler.output_frames_max().max(1);
-            Self::ensure_output_storage(&mut self.deinterleaved_out, channels, output_frames_cap);
-            let mut adapter_out = SequentialSliceOfVecs::new_mut(
-                &mut self.deinterleaved_out,
-                channels,
-                output_frames_cap,
-            )
-            .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
+            let used_out = {
+                let resampler = self
+                    .resampler
+                    .as_mut()
+                    .expect("resampler presence checked above");
+                let adapter_in =
+                    SequentialSliceOfVecs::new(&self.deinterleaved_in, channels, input_frames_next)
+                        .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
 
-            let (_used_in, used_out) = resampler
-                .process_into_buffer(
-                    &adapter_in,
-                    &mut adapter_out,
-                    Some(&Indexing {
-                        input_offset: 0,
-                        output_offset: 0,
-                        partial_len: None,
-                        active_channels_mask: None,
-                    }),
+                let output_frames_cap = resampler.output_frames_max().max(1);
+                Self::ensure_output_storage(
+                    &mut self.deinterleaved_out,
+                    channels,
+                    output_frames_cap,
+                );
+                let mut adapter_out = SequentialSliceOfVecs::new_mut(
+                    &mut self.deinterleaved_out,
+                    channels,
+                    output_frames_cap,
                 )
                 .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
 
-            Self::interleave_append_to(&self.deinterleaved_out, used_out, output);
+                let (_used_in, used_out) = resampler
+                    .process_into_buffer(
+                        &adapter_in,
+                        &mut adapter_out,
+                        Some(&Indexing {
+                            input_offset: 0,
+                            output_offset: 0,
+                            partial_len: None,
+                            active_channels_mask: None,
+                        }),
+                    )
+                    .map_err(|e| InputConversionError::ResamplerProcess(e.to_string()))?;
+                used_out
+            };
+
+            self.append_trimmed_resampler_output(used_out, target_output_frames, output);
             consumed_frames += input_frames_next;
         }
 
@@ -401,6 +563,105 @@ mod tests {
 
         assert!(produced > 0);
         assert_eq!(produced % MASTER_FORMAT.channels as usize, 0);
+    }
+
+    fn convert_and_finish(converter: &mut MasterFormatConverter, input: &[f32]) -> Vec<f32> {
+        let mut output = Vec::new();
+        converter.convert(input, &mut output).expect("convert");
+        let mut all_output = output.clone();
+        converter.finish(&mut output).expect("finish");
+        all_output.extend_from_slice(&output);
+        all_output
+    }
+
+    fn peak_index(samples: &[f32]) -> usize {
+        samples
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+            .map(|(index, _)| index)
+            .expect("non-empty samples")
+    }
+
+    #[test]
+    fn finish_preserves_resampled_duration_for_partial_input() {
+        let mut converter = MasterFormatConverter::new(
+            MASTER_FORMAT,
+            StreamFormat::with_sample_format(16_000, 1, SampleFormat::F32),
+        )
+        .expect("converter");
+        let input = vec![0.25_f32; 4_800 * MASTER_FORMAT.channels as usize];
+        let mut output = Vec::new();
+
+        converter.convert(&input, &mut output).expect("convert");
+        let mut all_output = output.clone();
+        converter.finish(&mut output).expect("finish");
+        all_output.extend_from_slice(&output);
+
+        assert_eq!(all_output.len(), 1_600);
+        assert!(all_output[200..1_400]
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 1e-3));
+
+        converter.finish(&mut output).expect("finish again");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn resampler_discards_startup_delay_for_beginning_impulse() {
+        let mut converter = MasterFormatConverter::new(
+            MASTER_FORMAT,
+            StreamFormat::with_sample_format(16_000, 1, SampleFormat::F32),
+        )
+        .expect("converter");
+        let mut input = vec![0.0_f32; 4_800 * MASTER_FORMAT.channels as usize];
+        input[..MASTER_FORMAT.channels as usize].fill(1.0);
+
+        let output = convert_and_finish(&mut converter, &input);
+
+        assert_eq!(output.len(), 1_600);
+        assert!(peak_index(&output) <= 1, "beginning impulse was delayed");
+        assert!(output[..4].iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn finish_preserves_end_impulse_in_zero_tail() {
+        let mut converter = MasterFormatConverter::new(
+            MASTER_FORMAT,
+            StreamFormat::with_sample_format(16_000, 1, SampleFormat::F32),
+        )
+        .expect("converter");
+        let mut input = vec![0.0_f32; 4_800 * MASTER_FORMAT.channels as usize];
+        let last_frame = input.len() - MASTER_FORMAT.channels as usize;
+        input[last_frame..].fill(1.0);
+
+        let output = convert_and_finish(&mut converter, &input);
+
+        assert_eq!(output.len(), 1_600);
+        assert!(
+            peak_index(&output) >= output.len() - 2,
+            "end impulse was truncated"
+        );
+        assert!(output[output.len() - 4..]
+            .iter()
+            .any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn finish_emits_short_resampled_input() {
+        let mut converter = MasterFormatConverter::new(
+            MASTER_FORMAT,
+            StreamFormat::with_sample_format(16_000, 1, SampleFormat::F32),
+        )
+        .expect("converter");
+        let input = vec![0.25_f32; 100 * MASTER_FORMAT.channels as usize];
+        let mut output = Vec::new();
+
+        converter.convert(&input, &mut output).expect("convert");
+        assert!(output.is_empty());
+        converter.finish(&mut output).expect("finish");
+
+        assert_eq!(output.len(), 34);
     }
 
     #[test]

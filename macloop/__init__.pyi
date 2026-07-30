@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Iterator, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Iterator, Literal, Optional, Sequence, Union, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -154,6 +154,7 @@ class AsrSink:
 
 class WavSink:
     id: str
+    @overload
     def __init__(
         self,
         id: Optional[str] = None,
@@ -161,6 +162,22 @@ class WavSink:
         route: Optional[RouteHandle] = None,
         routes: Optional[Sequence[RouteHandle]] = None,
         file: Any,
+        sample_rate: None = None,
+        channels: None = None,
+        sample_format: None = None,
+        mix_gain: Optional[float] = None,
+    ) -> None: ...
+    @overload
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        *,
+        route: Optional[RouteHandle] = None,
+        routes: Optional[Sequence[RouteHandle]] = None,
+        file: Any,
+        sample_rate: int,
+        channels: Literal[1, 2],
+        sample_format: Literal["f32", "i16"],
         mix_gain: Optional[float] = None,
     ) -> None: ...
     def stats(self) -> WavSinkStats: ...

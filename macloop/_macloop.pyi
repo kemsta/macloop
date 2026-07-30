@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -45,7 +45,7 @@ class _AsrSinkBackend:
 
 class _WavSinkBackend:
     def stats(self) -> WavSinkStats: ...
-    def close(self) -> None: ...
+    def close(self, engine: Optional[_AudioEngineBackend] = None) -> None: ...
 
 
 class AsrInputStats:
@@ -104,5 +104,15 @@ def _create_wav_sink(
     sink_id: str,
     route_ids: list[str],
     fd: int,
+    mix_gain: float,
+) -> _WavSinkBackend: ...
+def _create_wav_sink_with_config(
+    engine: _AudioEngineBackend,
+    sink_id: str,
+    route_ids: list[str],
+    fd: int,
+    sample_rate: int,
+    channels: Literal[1, 2],
+    sample_format: Literal["f32", "i16"],
     mix_gain: float,
 ) -> _WavSinkBackend: ...

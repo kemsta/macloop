@@ -24,7 +24,7 @@ from ._macloop import (
     _AudioEngineBackend,
     _WavSinkBackend,
     _create_asr_sink,
-    _create_wav_sink,
+    _create_wav_sink_with_config,
 )
 from ._macloop import list_applications as _list_applications
 from ._macloop import list_displays as _list_displays
@@ -35,6 +35,9 @@ from ._macloop import microphone_access, screen_capture_access
 AudioSamples = Union[npt.NDArray[np.int16], npt.NDArray[np.float32]]
 
 _STOP = object()
+_WAV_DEFAULT_SAMPLE_RATE = 48_000
+_WAV_DEFAULT_CHANNELS = 2
+_WAV_DEFAULT_SAMPLE_FORMAT = "f32"
 
 
 def _generate_id(prefix: str) -> str:
@@ -632,8 +635,16 @@ class WavSink:
         route: Optional[RouteHandle] = None,
         routes: Optional[Sequence[RouteHandle]] = None,
         file: Any,
+        sample_rate: Optional[int] = None,
+        channels: Optional[int] = None,
+        sample_format: Optional[str] = None,
         mix_gain: Optional[float] = None,
     ) -> None:
+        output_sample_rate, output_channels, output_sample_format = _resolve_wav_format(
+            sample_rate=sample_rate,
+            channels=channels,
+            sample_format=sample_format,
+        )
         route_list = _resolve_sink_routes(route=route, routes=routes)
         engine = _engine_from_routes(route_list)
         engine._ensure_open()
@@ -644,11 +655,14 @@ class WavSink:
         effective_mix_gain = mix_gain if mix_gain is not None else (1.0 / len(route_ids))
         fd, should_close = _resolve_wav_fd(file)
         try:
-            backend = _create_wav_sink(
+            backend = _create_wav_sink_with_config(
                 engine._backend,
                 sink_id,
                 route_ids,
                 fd,
+                output_sample_rate,
+                output_channels,
+                output_sample_format,
                 float(effective_mix_gain),
             )
         finally:
@@ -731,6 +745,30 @@ def _resolve_sink_routes(
     if routes is None or not routes:
         raise ValueError("routes must not be empty")
     return routes
+
+
+def _resolve_wav_format(
+    *,
+    sample_rate: Optional[int],
+    channels: Optional[int],
+    sample_format: Optional[str],
+) -> Tuple[int, int, str]:
+    values = (sample_rate, channels, sample_format)
+    if all(value is None for value in values):
+        return (
+            _WAV_DEFAULT_SAMPLE_RATE,
+            _WAV_DEFAULT_CHANNELS,
+            _WAV_DEFAULT_SAMPLE_FORMAT,
+        )
+    if any(value is None for value in values):
+        raise ValueError(
+            "sample_rate, channels, and sample_format must be provided together"
+        )
+
+    assert sample_rate is not None
+    assert channels is not None
+    assert sample_format is not None
+    return sample_rate, channels, sample_format
 
 
 def _resolve_wav_fd(file: Any) -> Tuple[int, bool]:
