@@ -952,20 +952,12 @@ impl PythonAsrCallback {
                             input_id,
                             frames,
                             samples,
-                        } => (
-                            input_id,
-                            frames,
-                            samples.to_pyarray(py).into_any().unbind(),
-                        ),
+                        } => (input_id, frames, samples.to_pyarray(py).into_any().unbind()),
                         AsrWorkerPayload::I16 {
                             input_id,
                             frames,
                             samples,
-                        } => (
-                            input_id,
-                            frames,
-                            samples.to_pyarray(py).into_any().unbind(),
-                        ),
+                        } => (input_id, frames, samples.to_pyarray(py).into_any().unbind()),
                     };
 
                     if let Err(err) = callback.call1(py, (input_id, frames, samples_obj)) {

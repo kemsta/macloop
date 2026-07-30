@@ -4,6 +4,7 @@ import os
 import queue
 import struct
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -190,7 +191,11 @@ def test_low_level_ffi_wav_sink_converts_to_mono_pcm16(tmp_path: Path) -> None:
             1.0,
         )
         try:
-            threading.Event().wait(0.5)
+            deadline = time.monotonic() + 5.0
+            while engine.get_stats()["synthetic_stream"].pipeline.latency.count < 60:
+                if time.monotonic() >= deadline:
+                    pytest.fail("Synthetic source did not produce every configured callback")
+                time.sleep(0.01)
         finally:
             sink.close()
             stats = sink.stats()
